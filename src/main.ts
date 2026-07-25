@@ -21,7 +21,7 @@ import {
 // Obsidian only delivers main.js/manifest.json/styles.css, not extra asset files.
 import LOADER_GIF_URI from "../chat-d.gif";
 
-const VIEW_TYPE_READABLE_HTML = "notes-to-html-pages-html-view";
+const VIEW_TYPE_READABLE_HTML = "notes-to-html-pages-boson-html-view";
 
 type HtmlStylePreset = "clean";
 type UiLanguage = "zh" | "en";
@@ -82,9 +82,11 @@ const UI_TEXT: Record<UiLanguage, Record<string, string>> = {
 		settingEmbedImagesDesc: "把本地图片转为 data URI，方便 HTML 文件独立打开。",
 		settingTtsHeading: "语音合成 (TTS)",
 		settingTtsEnabledName: "启用语音伴读",
-		settingTtsEnabledDesc: "导出时调用火山引擎语音合成大模型生成音频并嵌入 HTML，支持逐句高亮。",
+		settingTtsProviderName: "语音服务商",
+		settingTtsProviderDesc: "选择语音合成服务商。切换后音色列表会自动替换为该服务商的默认音色。",
+		settingTtsEnabledDesc: "导出时调用语音合成 API 生成音频并嵌入 HTML，支持逐句高亮。",
 		settingTtsAccessKeyName: "API Key",
-		settingTtsAccessKeyDesc: "火山引擎语音技术控制台的 API Key。",
+		settingTtsAccessKeyDesc: "API Key。",
 		settingTtsGetKeyLink: "获取 API Key →",
 		settingTtsVoiceLibraryName: "配音音色",
 		ttsVoiceRecommended: "推荐",
@@ -164,9 +166,11 @@ const UI_TEXT: Record<UiLanguage, Record<string, string>> = {
 		settingEmbedImagesDesc: "Converts local images to data URIs so the HTML file can be opened standalone.",
 		settingTtsHeading: "Text-to-Speech (TTS)",
 		settingTtsEnabledName: "Enable Read Along",
-		settingTtsEnabledDesc: "Generate audio via Volcengine big-model TTS on export and embed it with sentence highlighting.",
+		settingTtsProviderName: "TTS Provider",
+		settingTtsProviderDesc: "Select a TTS provider. Switching will replace the voice list with the provider's default voices.",
+		settingTtsEnabledDesc: "Generate speech audio on export via TTS API and embed it with sentence highlighting.",
 		settingTtsAccessKeyName: "API Key",
-		settingTtsAccessKeyDesc: "API Key from the Volcengine speech console.",
+		settingTtsAccessKeyDesc: "API Key for the TTS service.",
 		settingTtsGetKeyLink: "Get an API Key →",
 		settingTtsVoiceLibraryName: "Voices",
 		ttsVoiceRecommended: "Recommended",
@@ -212,6 +216,7 @@ interface ReadableHtmlSettings {
 	createLauncherNote: boolean;
 	insertLinkInSource: boolean;
 	ttsEnabled: boolean;
+	ttsProvider: string;
 	ttsAppId: string;
 	ttsAccessKey: string;
 	ttsResourceId: string;
@@ -251,6 +256,7 @@ const DEFAULT_SETTINGS: ReadableHtmlSettings = {
 	createLauncherNote: false,
 	insertLinkInSource: true,
 	ttsEnabled: false,
+	ttsProvider: "volcengine",
 	ttsAppId: "",
 	ttsAccessKey: "",
 	ttsResourceId: "volc.service_type.10029",
@@ -263,6 +269,447 @@ const DEFAULT_SETTINGS: ReadableHtmlSettings = {
 // copy. Anchored on the (current + historical) label only — the link text is matched
 // generically (any wikilink or markdown link), so future relabeling of the alias never breaks
 // the overwrite again.
+
+// ── TTS Provider abstraction ──────────────────────────────────────────
+
+interface TtsProvider {
+	readonly id: string;
+	readonly name: string;
+	readonly nameEn: string;
+
+	call(apiKey: string, text: string, voiceType: string): Promise<Uint8Array>;
+
+	getDefaultVoices(): TtsVoice[];
+
+	getApiKeyUrl(): string;
+}
+
+// ── Volcengine provider ──────────────────────────────────────────────
+
+const VOLCENGINE_DEFAULT_VOICES: TtsVoice[] = [
+	{ name: "刘飞", voiceType: "zh_male_liufei_uranus_bigtts", style: "男声 · 沉稳磁性", hue: 255, recommended: true },
+	{ name: "玲玲姐 2.0", voiceType: "zh_female_lingling_uranus_bigtts", style: "女声", hue: 343 },
+	{ name: "儒雅逸辰 2.0", voiceType: "zh_male_ruyayichen_uranus_bigtts", style: "男声 · 气泡音", hue: 339 },
+	{ name: "大壹", voiceType: "zh_male_dayi_uranus_bigtts", style: "男声 · 沉稳", hue: 343 },
+	{ name: "温暖阿虎/Alvin 2.0", voiceType: "zh_male_wennuanahu_uranus_bigtts", style: "男声 · 温暖", hue: 234 },
+	{ name: "魅力苏菲 2.0", voiceType: "zh_female_sophie_uranus_bigtts", style: "女声 · 高冷御姐", hue: 213 },
+	{ name: "湾湾小何", voiceType: "zh_female_wanwanxiaohe_moon_bigtts", style: "女声 · 甜美台湾腔", hue: 72 },
+	{ name: "台湾口音", voiceType: "zh_male_zhoujielun_emo_v2_mars_bigtts", style: "男声 · 台湾腔", hue: 123 }
+];
+
+const volcengineProvider: TtsProvider = {
+	id: "volcengine",
+	name: "火山引擎",
+	nameEn: "Volcengine",
+
+	async call(apiKey: string, text: string, voiceType: string): Promise<Uint8Array> {
+		const candidates = resourceCandidates(voiceType);
+		let lastErr: Error | null = null;
+		for (const rid of candidates) {
+			try {
+				const bytes = await callVolcengine(apiKey, text, rid, voiceType);
+				if (bytes.length > 0) return bytes;
+				lastErr = new Error("empty audio");
+			} catch (err) {
+				lastErr = err instanceof Error ? err : new Error(String(err));
+				if (!/mismatch|55000000/i.test(lastErr.message)) throw lastErr;
+			}
+		}
+		throw lastErr || new Error("no matching resource for this voice");
+	},
+
+	getDefaultVoices(): TtsVoice[] {
+		return VOLCENGINE_DEFAULT_VOICES.map((v) => ({ ...v }));
+	},
+
+	getApiKeyUrl(): string {
+		return "https://console.volcengine.com/speech/new/experience/tts?projectName=default";
+	}
+};
+
+function resourceCandidates(voice: string): string[] {
+	const v = (voice || "").toLowerCase();
+	const known = ["seed-tts-2.0", "volc.service_type.10029", "seed-icl-2.0"];
+	let first = "seed-tts-2.0";
+	if (v.includes("_moon")) {
+		first = "volc.service_type.10029";
+	} else if (v.includes("_uranus") || v.includes("_mars")) {
+		first = "seed-tts-2.0";
+	}
+	return [first, ...known.filter((r) => r !== first)];
+}
+
+async function callVolcengine(
+	apiKey: string,
+	text: string,
+	resourceId: string,
+	speaker: string
+): Promise<Uint8Array> {
+	const reqId = generateUUID();
+	const body = JSON.stringify({
+		user: { uid: "notes-to-html-pages-boson" },
+		req_params: {
+			text,
+			speaker,
+			audio_params: { format: "mp3", sample_rate: 24000 }
+		}
+	});
+
+	const resp = await requestUrl({
+		url: "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
+		method: "POST",
+		throw: false,
+		headers: {
+			"Content-Type": "application/json",
+			"X-Api-Key": apiKey,
+			"X-Api-Resource-Id": resourceId,
+			"X-Api-Request-Id": reqId
+		},
+		body
+	});
+
+	return parseVolcengineResponse(resp);
+}
+
+function parseVolcengineResponse(resp: {
+	status: number;
+	arrayBuffer: ArrayBuffer;
+	text: string;
+	headers: Record<string, string>;
+}): Uint8Array {
+	const bytes = new Uint8Array(resp.arrayBuffer);
+	const is2xx = resp.status >= 200 && resp.status < 300;
+	const headers = resp.headers || {};
+	const contentType = headers["content-type"] || headers["Content-Type"] || "";
+	const ctIsAudio = /audio\//i.test(contentType);
+	const ctIsJson = /json|event-stream/i.test(contentType);
+
+	if (ctIsAudio && is2xx && bytes.length > 0) return bytes;
+
+	const looksJson = bytes.length > 0 && bytes[0] === 0x7b;
+	const looksSse = /^\s*data:/m.test(resp.text);
+
+	if (!ctIsJson && !looksJson && !looksSse && is2xx && bytes.length > 0) return bytes;
+
+	const audio = extractAudioFromJsonStream(resp.text);
+	if (audio && audio.length > 0) return audio;
+
+	let message = resp.text ? resp.text.slice(0, 300) : "HTTP " + resp.status;
+	try {
+		const j = JSON.parse(resp.text);
+		message = j?.header?.message || j?.message || message;
+	} catch (e) {}
+	throw new Error("status " + resp.status + ": " + message);
+}
+
+function extractAudioFromJsonStream(text: string): Uint8Array | null {
+	if (!text) return null;
+	const audioFields = ["data", "audio", "audio_data"];
+	const collected: Uint8Array[] = [];
+
+	const pushAudioFields = (rec: Record<string, unknown>): void => {
+		for (const field of audioFields) {
+			const v = rec[field];
+			if (typeof v === "string" && v.length > 0) {
+				try {
+					const bin = atob(v);
+					const arr = new Uint8Array(bin.length);
+					for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+					collected.push(arr);
+				} catch (e) {}
+			}
+		}
+	};
+
+	const pushFromObject = (obj: unknown): void => {
+		if (!obj || typeof obj !== "object") return;
+		const rec = obj as Record<string, unknown>;
+		pushAudioFields(rec);
+		for (const key of Object.keys(rec)) {
+			const child = rec[key];
+			if (child && typeof child === "object" && !Array.isArray(child)) {
+				pushAudioFields(child as Record<string, unknown>);
+			}
+		}
+	};
+
+	try { pushFromObject(JSON.parse(text)); } catch (e) {}
+
+	if (collected.length === 0) {
+		for (const rawLine of text.split(/\r?\n/)) {
+			let line = rawLine.trim();
+			if (!line) continue;
+			if (line.startsWith("data:")) line = line.slice(5).trim();
+			if (!line || line === "[DONE]") continue;
+			try { pushFromObject(JSON.parse(line)); } catch (e) {}
+		}
+	}
+
+	if (collected.length === 0 && text.indexOf("}{") >= 0) {
+		for (const chunk of text.split(/(?<=})\s*(?=\{)/)) {
+			try { pushFromObject(JSON.parse(chunk)); } catch (e) {}
+		}
+	}
+
+	if (collected.length === 0) return null;
+	const total = collected.reduce((s, c) => s + c.length, 0);
+	const out = new Uint8Array(total);
+	let off = 0;
+	for (const c of collected) { out.set(c, off); off += c.length; }
+	return out;
+}
+
+function generateUUID(): string {
+	if (typeof crypto !== "undefined" && crypto.randomUUID) {
+		return crypto.randomUUID();
+	}
+	return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+		const r = (Math.random() * 16) | 0;
+		return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+	});
+}
+
+// ── Boson provider ───────────────────────────────────────────────────
+
+const BOSON_DEFAULT_VOICES: TtsVoice[] = [
+	{ name: "Chloe", voiceType: "chloe", style: "Female · friendly, clear, American", hue: 310, recommended: true },
+	{ name: "Eleanor", voiceType: "eleanor", style: "Female · calm, articulate, American", hue: 210 },
+	{ name: "Jake", voiceType: "jake", style: "Male · energetic, dramatic", hue: 160 },
+	{ name: "Marcus", voiceType: "marcus", style: "Male · enthusiastic, confident", hue: 130 },
+	{ name: "Nora", voiceType: "nora", style: "Female · calm, narrative, American", hue: 280 },
+	{ name: "Oliver", voiceType: "oliver", style: "Male · calm, articulate, American", hue: 30 },
+	{ name: "Berlinda", voiceType: "berlinda", style: "Female", hue: 340 },
+];
+
+const bosonProvider: TtsProvider = {
+	id: "boson",
+	name: "Boson Higgs TTS",
+	nameEn: "Boson Higgs TTS",
+
+	async call(apiKey: string, text: string, voiceType: string): Promise<Uint8Array> {
+		const body = JSON.stringify({
+			model: "higgs-tts-3",
+			input: text,
+			voice: voiceType,
+			response_format: "mp3"
+		});
+
+		const resp = await requestUrl({
+			url: "https://api.boson.ai/v1/audio/speech",
+			method: "POST",
+			throw: false,
+			headers: {
+				"Content-Type": "application/json",
+				"Authorization": "Bearer " + apiKey
+			},
+			body
+		});
+
+		const bytes = new Uint8Array(resp.arrayBuffer);
+		const is2xx = resp.status >= 200 && resp.status < 300;
+		if (is2xx && bytes.length > 0) return bytes;
+
+		let message = resp.text ? resp.text.slice(0, 300) : "HTTP " + resp.status;
+		try {
+			const j = JSON.parse(resp.text);
+			message = j?.error?.message || j?.message || message;
+		} catch (e) {}
+		throw new Error("Boson TTS error (" + resp.status + "): " + message);
+	},
+
+	getDefaultVoices(): TtsVoice[] {
+		return BOSON_DEFAULT_VOICES.map((v) => ({ ...v }));
+	},
+
+	getApiKeyUrl(): string {
+		return "https://www.boson.ai/workspace";
+	}
+};
+
+
+
+// ── Edge TTS provider (free, no API key needed) ─────────────────────
+
+/**
+ * The underlying WebSocket endpoint and token are stable values
+ * reverse-engineered from Microsoft Edge's Read Aloud feature
+ * (same protocol used by the popular edge-tts Python library).
+ * The token is embedded in the Edge client and rarely changes.
+ */
+const EDGE_TTS_HOST = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1";
+const EDGE_TTS_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+
+const EDGE_TTS_DEFAULT_VOICES: TtsVoice[] = [
+	{ name: "晓晓 (女)", voiceType: "zh-CN-XiaoxiaoNeural", style: "女声 · 亲切自然", hue: 330, recommended: true },
+	{ name: "云希 (男)", voiceType: "zh-CN-YunxiNeural", style: "男声 · 阳光活力", hue: 210 },
+	{ name: "云扬 (男)", voiceType: "zh-CN-YunyangNeural", style: "男声 · 新闻播报", hue: 150 },
+	{ name: "晓辰 (女)", voiceType: "zh-CN-XiaochenNeural", style: "女声 · 清新知性", hue: 300 },
+	{ name: "晓梦 (女)", voiceType: "zh-CN-XiaomengNeural", style: "女声 · 活泼可爱", hue: 20 },
+	{ name: "晓墨 (女)", voiceType: "zh-CN-XiaomoNeural", style: "女声 · 温柔", hue: 280 },
+	{ name: "晓颜 (女)", voiceType: "zh-CN-XiaoyanNeural", style: "女声 · 自然", hue: 260 },
+	{ name: "晓双 (女童)", voiceType: "zh-CN-XiaoshuangNeural", style: "女童 · 天真", hue: 50 },
+	{ name: "晓悠 (男童)", voiceType: "zh-CN-XiaoyouNeural", style: "男童 · 可爱", hue: 100 },
+	{ name: "云枫 (男)", voiceType: "zh-CN-YunfengNeural", style: "男声 · 沉稳", hue: 180 },
+	{ name: "Aria (英)", voiceType: "en-US-AriaNeural", style: "Female · natural, American", hue: 310 },
+	{ name: "Jenny (英)", voiceType: "en-US-JennyNeural", style: "Female · friendly, American", hue: 290 },
+	{ name: "Guy (英)", voiceType: "en-US-GuyNeural", style: "Male · confident, American", hue: 170 },
+];
+
+/**
+ * Synthesize speech via Edge TTS WebSocket.
+ * Returns MP3 bytes as Uint8Array.
+ */
+async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Array> {
+	const connId = generateUUID();
+	const url = EDGE_TTS_HOST
+		+ "?trustedclienttoken=" + EDGE_TTS_TOKEN
+		+ "&connectionId=" + connId;
+
+	return new Promise<Uint8Array>((resolve, reject) => {
+		const ws = new WebSocket(url);
+		const audioChunks: Uint8Array[] = [];
+		let timedOut = false;
+		let resolved = false;
+
+		const timer = setTimeout(() => {
+			timedOut = true;
+			ws.close();
+			reject(new Error("Edge TTS timed out"));
+		}, 30000);
+
+		ws.binaryType = "arraybuffer";
+
+		ws.binaryType = "arraybuffer";
+
+		ws.onopen = () => {
+			// Send audio config (must include headers for Edge TTS protocol)
+			const configBody = JSON.stringify({
+				context: {
+					synthesis: {
+						audio: {
+							metadataoptions: {
+								sentenceBoundaryEnabled: false,
+								wordBoundaryEnabled: false,
+							},
+							outputFormat: "audio-24khz-48kbitrate-mono-mp3",
+						},
+					},
+				},
+			});
+			ws.send("Content-Type:application/json; charset=utf-8" + String.fromCharCode(13,10) + "Path:speech.config" + String.fromCharCode(13,10,13,10) + configBody);
+
+			// Derive xml:lang from voice code (e.g. "zh-CN-XiaoxiaoNeural" -> "zh-CN")
+			const lang = voice.match(/^[a-z]{2}-[A-Z]{2}/)?.[0] || "zh-CN";
+
+			// Send SSML (with protocol headers)
+			const ssml = '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis"'
+				+ ' xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="' + lang + '">'
+				+ '<voice name="' + voice + '">'
+				+ '<prosody rate="0%" pitch="0%">'
+				+ text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+				+ '</prosody>'
+				+ '</voice>'
+				+ '</speak>';
+			ws.send("Content-Type:application/ssml+xml" + String.fromCharCode(13,10) + "Path:ssml" + String.fromCharCode(13,10,13,10) + ssml);
+		};
+
+		ws.onmessage = (event) => {
+			if (timedOut) return;
+
+			if (event.data instanceof ArrayBuffer) {
+				const bytes = new Uint8Array(event.data);
+				const separator = findDoubleCRLF(bytes);
+				if (separator >= 0) {
+					// Everything after header is audio
+					const audioData = bytes.subarray(separator + 4);
+					if (audioData.length > 0) {
+						audioChunks.push(audioData);
+					}
+				} else {
+					// No header separator - likely pure audio
+					audioChunks.push(bytes);
+				}
+			} else if (typeof event.data === "string") {
+				// Text message - check if it's the final "turn.end"
+				if (event.data.includes("turn.end")) {
+					clearTimeout(timer);
+					if (resolved) return;
+					resolved = true;
+					ws.close();
+					// Assemble all audio chunks
+					const total = audioChunks.reduce((s, c) => s + c.length, 0);
+					const out = new Uint8Array(total);
+					let offset = 0;
+					for (const chunk of audioChunks) {
+						out.set(chunk, offset);
+						offset += chunk.length;
+					}
+					resolve(out);
+				}
+			}
+		};
+
+		ws.onerror = (_err) => {
+			clearTimeout(timer);
+			if (resolved) return;
+			resolved = true;
+			reject(new Error("Edge TTS WebSocket error"));
+		};
+
+		ws.onclose = (evt) => {
+			clearTimeout(timer);
+			if (resolved) return;
+			resolved = true;
+			if (audioChunks.length > 0) {
+				const total = audioChunks.reduce((s, c) => s + c.length, 0);
+				const out = new Uint8Array(total);
+				let offset = 0;
+				for (const chunk of audioChunks) {
+					out.set(chunk, offset);
+					offset += chunk.length;
+				}
+				resolve(out);
+			} else if (!timedOut) {
+				reject(new Error("Edge TTS closed (code=" + evt.code + ")"));
+			}
+		};
+	});
+}
+
+function findDoubleCRLF(bytes: Uint8Array): number {
+	for (let i = 0; i < bytes.length - 3; i++) {
+		if (bytes[i] === 0x0d && bytes[i + 1] === 0x0a
+			&& bytes[i + 2] === 0x0d && bytes[i + 3] === 0x0a) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+const edgeTtsProvider: TtsProvider = {
+	id: "edge-tts",
+	name: "Edge TTS (免费)",
+	nameEn: "Edge TTS (Free)",
+
+	async call(_apiKey: string, text: string, voiceType: string): Promise<Uint8Array> {
+		return edgeTtsSynthesize(text, voiceType || "zh-CN-XiaoxiaoNeural");
+	},
+
+	getDefaultVoices(): TtsVoice[] {
+		return EDGE_TTS_DEFAULT_VOICES.map((v) => ({ ...v }));
+	},
+
+	getApiKeyUrl(): string {
+		return "";
+	}
+};
+
+const TTS_PROVIDERS: Record<string, TtsProvider> = {
+	volcengine: volcengineProvider,
+	boson: bosonProvider,
+	"edge-tts": edgeTtsProvider,
+};
+
 const SOURCE_LINK_BLOCK_REGEX =
 	/(?:%% readable-html-exporter-link:start %%\r?\n)?^> (?:阅读版 HTML|HTML 页面|Readable HTML|HTML Page|语音伴读|Read Along|Read-Along)\s*[：:]\s*(?:\[\[[^\]]+\]\]|\[[^\]]*\]\([^)]*\))\s*\r?\n(?:%% readable-html-exporter-link:end %%\r?\n?)?/gm;
 
@@ -286,6 +733,10 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 	settings: ReadableHtmlSettings = DEFAULT_SETTINGS;
 	private markdown!: MarkdownIt;
 	private ttsGenerationId = 0;
+
+	getCurrentProvider(): TtsProvider {
+		return TTS_PROVIDERS[this.settings.ttsProvider] || TTS_PROVIDERS.volcengine;
+	}
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -413,6 +864,9 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		if (typeof data.ttsEnabled === "boolean") {
 			settings.ttsEnabled = data.ttsEnabled;
 		}
+		if (typeof data.ttsProvider === "string") {
+			settings.ttsProvider = data.ttsProvider;
+		}
 		if (typeof data.ttsAccessKey === "string") {
 			settings.ttsAccessKey = data.ttsAccessKey;
 		} else if (typeof data.ttsApiKey === "string") {
@@ -454,7 +908,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 				}));
 		} else {
 			// no saved list (fresh install / migration): start from a copy of the presets
-			settings.ttsVoices = DEFAULT_TTS_VOICES.map((v) => ({ ...v }));
+			settings.ttsVoices = VOLCENGINE_DEFAULT_VOICES.map((v) => ({ ...v }));
 		}
 
 		return settings;
@@ -559,11 +1013,17 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			return;
 		}
 
-		let successCount = 0;
-		for (const file of files) {
-			await this.exportFile(file, false);
-			successCount += 1;
-		}
+		// Use Promise.allSettled for parallel export (faster for many files)
+		const results = await Promise.allSettled(files.map(async (file) => {
+			try {
+				await this.exportFile(file, false);
+				return true;
+			} catch (e) {
+				console.error("Export failed for", file.path, e);
+				return false;
+			}
+		}));
+		const successCount = results.filter((r) => r.status === "fulfilled" && r.value === true).length;
 
 			new Notice(this.t("noticeFolderExported", { count: successCount }));
 	}
@@ -632,7 +1092,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		let ttsScript = "";
 
 		const ttsEnabled = this.settings.ttsEnabled
-			&& this.settings.ttsAccessKey.trim() !== "";
+			&& (this.settings.ttsProvider === "edge-tts" || this.settings.ttsAccessKey.trim() !== "");
 		if (ttsEnabled) {
 			const { sentences, html: wrappedBody } = this.splitAndWrapSentences(body);
 			if (sentences.length > 0) {
@@ -702,7 +1162,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			"<head>",
 			'<meta charset="utf-8">',
 			'<meta name="viewport" content="width=device-width, initial-scale=1">',
-			`<meta name="notes-to-html-pages-style" content="${stylePreset}">`,
+			`<meta name="notes-to-html-pages-boson-style" content="${stylePreset}">`,
 			`<title>${this.escapeHtml(title)}</title>`,
 			`<style>${this.getStyleCss(stylePreset)}</style>`,
 			ttsDataTag,
@@ -797,201 +1257,14 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		return { sentences, html: root.innerHTML };
 	}
 
-	private async callTtsApi(text: string, resourceId: string, speaker: string): Promise<Uint8Array> {
-		const reqId = this.generateUUID();
-		const body = JSON.stringify({
-			user: { uid: "notes-to-html-pages" },
-			req_params: {
-				text,
-				speaker,
-				audio_params: { format: "mp3", sample_rate: 24000 }
-			}
-		});
 
-		const resp = await requestUrl({
-			url: this.settings.ttsApiUrl,
-			method: "POST",
-			throw: false,
-			headers: {
-				"Content-Type": "application/json",
-				"X-Api-Key": this.settings.ttsAccessKey,
-				"X-Api-Resource-Id": resourceId,
-				"X-Api-Request-Id": reqId
-			},
-			body
-		});
 
-		return this.parseTtsResponse(resp);
-	}
+// deprecated — see volcengineProvider.call()
 
-	// The X-Api-Resource-Id must match the voice's model space. Rather than make the
-	// user configure it, we derive a best-guess order from the voice name and fall back
-	// to the other known resources only when the API reports a speaker/resource mismatch.
-	private resourceCandidates(voice: string): string[] {
-		const v = (voice || "").toLowerCase();
-		const known = ["seed-tts-2.0", "volc.service_type.10029", "seed-icl-2.0"];
-		let first = "seed-tts-2.0";
-		if (v.includes("_moon")) {
-			first = "volc.service_type.10029";
-		} else if (v.includes("_uranus") || v.includes("_mars")) {
-			first = "seed-tts-2.0";
-		}
-		return [first, ...known.filter((r) => r !== first)];
-	}
-
-	// Synthesize one sentence, auto-detecting the resource id. Returns the audio plus the
-	// resource that worked so the caller can reuse it for the remaining sentences.
-	private async synthesizeAutoResource(
-		text: string,
-		preferredResourceId: string,
-		voiceType: string
-	): Promise<{ bytes: Uint8Array; resourceId: string }> {
-		const candidates = preferredResourceId
-			? [preferredResourceId]
-			: this.resourceCandidates(voiceType);
-		let lastErr: Error | null = null;
-		for (const rid of candidates) {
-			try {
-				const bytes = await this.callTtsApi(text, rid, voiceType);
-				if (bytes.length > 0) return { bytes, resourceId: rid };
-				lastErr = new Error("empty audio");
-			} catch (err) {
-				lastErr = err instanceof Error ? err : new Error(String(err));
-				// Only try another resource on a speaker/resource mismatch;
-				// auth/quota/text errors are not fixed by switching resources.
-				if (!/mismatch|55000000/i.test(lastErr.message)) throw lastErr;
-			}
-		}
-		throw lastErr || new Error("no matching resource for this voice");
-	}
-
-	// Synthesize a short test sample with the given voice (falls back to the selected
-	// voice). Returns the audio bytes; throws with a human-readable message on failure.
-	// The settings UI renders the visual state (spinner/result), so no toast here.
-	async synthesizeTestSample(voiceType: string): Promise<Uint8Array> {
-		if (this.settings.ttsAccessKey.trim() === "") {
-			throw new Error(this.t("noticeTtsNoApiKey"));
-		}
-		const speaker = (voiceType || this.settings.ttsVoiceType || "").trim();
-		if (!speaker) {
-			throw new Error(this.t("ttsVoiceAddNeedId"));
-		}
-		const { bytes } = await this.synthesizeAutoResource("你好，这是配音音色测试。", "", speaker);
-		if (bytes.length === 0) {
-			throw new Error("empty audio");
-		}
-		return bytes;
-	}
-
-	private parseTtsResponse(resp: {
-		status: number;
-		arrayBuffer: ArrayBuffer;
-		text: string;
-		headers: Record<string, string>;
-	}): Uint8Array {
-		const bytes = new Uint8Array(resp.arrayBuffer);
-		const is2xx = resp.status >= 200 && resp.status < 300;
-
-		// Prefer Content-Type over byte-sniffing (requestUrl may lowercase header names)
-		const headers = resp.headers || {};
-		const contentType = headers["content-type"] || headers["Content-Type"] || "";
-		const ctIsAudio = /audio\//i.test(contentType);
-		const ctIsJson = /json|event-stream/i.test(contentType);
-
-		if (ctIsAudio && is2xx && bytes.length > 0) {
-			// Content-Type clearly indicates audio
-			return bytes;
-		}
-
-		const looksJson = bytes.length > 0 && bytes[0] === 0x7b; // '{'
-		const looksSse = /^\s*data:/m.test(resp.text);
-
-		if (!ctIsJson && !looksJson && !looksSse && is2xx && bytes.length > 0) {
-			// raw audio bytes (Content-Type absent/ambiguous, byte heuristic fallback)
-			return bytes;
-		}
-
-		// JSON / SSE: may carry base64 audio chunks, or be an error envelope
-		const audio = this.extractAudioFromJsonStream(resp.text);
-		if (audio && audio.length > 0) {
-			return audio;
-		}
-
-		// no audio extracted -> treat as error
-		let message = resp.text ? resp.text.slice(0, 300) : `HTTP ${resp.status}`;
-		try {
-			const j = JSON.parse(resp.text) as { header?: { message?: string }; message?: string };
-			message = j?.header?.message || j?.message || message;
-		} catch (e) {
-			// not a single JSON object; keep truncated text
-		}
-		throw new Error(`status ${resp.status}: ${message}`);
-	}
-
-	private extractAudioFromJsonStream(text: string): Uint8Array | null {
-		if (!text) return null;
-		const audioFields = ["data", "audio", "audio_data"];
-		const collected: Uint8Array[] = [];
-
-		const pushAudioFields = (rec: Record<string, unknown>): void => {
-			for (const field of audioFields) {
-				const v = rec[field];
-				if (typeof v === "string" && v.length > 0) {
-					try {
-						const bin = atob(v);
-						const arr = new Uint8Array(bin.length);
-						for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-						collected.push(arr);
-					} catch (e) {
-						// field was not base64; ignore
-					}
-				}
-			}
-		};
-
-		const pushFromObject = (obj: unknown): void => {
-			if (!obj || typeof obj !== "object") return;
-			const rec = obj as Record<string, unknown>;
-			// top-level audio fields
-			pushAudioFields(rec);
-			// one level deep: audio may be nested under a wrapper (payload/data/header)
-			for (const key of Object.keys(rec)) {
-				const child = rec[key];
-				if (child && typeof child === "object" && !Array.isArray(child)) {
-					pushAudioFields(child as Record<string, unknown>);
-				}
-			}
-		};
-
-		// 1) Single JSON object (whole body is one object)
-		try { pushFromObject(JSON.parse(text)); } catch (e) { /* not a single object */ }
-
-		// 2) Line-delimited: NDJSON (one JSON object per line) or SSE ("data: {...}").
-		// The Volcengine v3 unidirectional endpoint streams newline-delimited JSON,
-		// each line like {"code":0,"data":"<base64 mp3 chunk>"}.
-		if (collected.length === 0) {
-			for (const rawLine of text.split(/\r?\n/)) {
-				let line = rawLine.trim();
-				if (!line) continue;
-				if (line.startsWith("data:")) line = line.slice(5).trim();
-				if (!line || line === "[DONE]") continue;
-				try { pushFromObject(JSON.parse(line)); } catch (e) { /* skip non-JSON line */ }
-			}
-		}
-
-		// 3) Multiple concatenated JSON objects with no delimiter ("}{")
-		if (collected.length === 0 && text.indexOf("}{") >= 0) {
-			for (const chunk of text.split(/(?<=})\s*(?=\{)/)) {
-				try { pushFromObject(JSON.parse(chunk)); } catch (e) { /* skip */ }
-			}
-		}
-
-		if (collected.length === 0) return null;
-		const total = collected.reduce((s, c) => s + c.length, 0);
-		const out = new Uint8Array(total);
-		let off = 0;
-		for (const c of collected) { out.set(c, off); off += c.length; }
-		return out;
+	// Inlined loading GIF (base64 data URI baked into main.js at build time). Self-contained
+	// so it renders regardless of how the plugin was installed.
+	loaderImgSrc(): string {
+		return LOADER_GIF_URI;
 	}
 
 	private bytesToBase64(bytes: Uint8Array): string {
@@ -1006,20 +1279,16 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		return btoa(bin);
 	}
 
-	// Inlined loading GIF (base64 data URI baked into main.js at build time). Self-contained
-	// so it renders regardless of how the plugin was installed.
-	loaderImgSrc(): string {
-		return LOADER_GIF_URI;
-	}
-
-	private generateUUID(): string {
-		if (typeof crypto !== "undefined" && crypto.randomUUID) {
-			return crypto.randomUUID();
+	synthesizeTestSample(voiceType: string): Promise<Uint8Array> {
+		const needsKey = this.settings.ttsProvider !== "edge-tts";
+		if (needsKey && this.settings.ttsAccessKey.trim() === "") {
+			throw new Error(this.t("noticeTtsNoApiKey"));
 		}
-		return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-			const r = (Math.random() * 16) | 0;
-			return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-		});
+		const speaker = (voiceType || this.settings.ttsVoiceType || "").trim();
+		if (!speaker) {
+			throw new Error(this.t("ttsVoiceAddNeedId"));
+		}
+		return this.getCurrentProvider().call(this.settings.ttsAccessKey, "你好，这是配音音色测试。", speaker);
 	}
 
 	private async generateTtsPlaylist(
@@ -1027,6 +1296,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		generationId: number
 	): Promise<TtsClip[]> {
 		const clips: TtsClip[] = [];
+		const provider = this.getCurrentProvider();
 		let failedCount = 0;
 		let firstError = "";
 		let resolvedResourceId = ""; // detected on first success, reused for the rest
@@ -1065,18 +1335,11 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 				setProgress(i + 1);
 
 				try {
-					const result = await this.synthesizeAutoResource(sentences[i], resolvedResourceId, this.settings.ttsVoiceType);
-					if (result.bytes.length === 0) {
+					const bytes = await provider.call(this.settings.ttsAccessKey, sentences[i], this.settings.ttsVoiceType);
+					if (bytes.length === 0) {
 						throw new Error("empty audio");
 					}
-					if (!resolvedResourceId) {
-						resolvedResourceId = result.resourceId;
-						if (this.settings.ttsResourceId !== resolvedResourceId) {
-							this.settings.ttsResourceId = resolvedResourceId;
-							await this.saveSettings();
-						}
-					}
-					clips.push({ idx: i, audio: this.bytesToBase64(result.bytes) });
+					clips.push({ idx: i, audio: this.bytesToBase64(bytes) });
 				} catch (err) {
 					if (this.ttsGenerationId !== generationId) {
 						throw new Error("TTS generation cancelled");
@@ -2265,6 +2528,29 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 	private renderTtsSettings(containerEl: HTMLElement): void {
 		new Setting(containerEl).setName(this.plugin.t("settingTtsHeading")).setHeading();
 
+		// Provider selector
+		new Setting(containerEl)
+			.setName(this.plugin.t("settingTtsProviderName"))
+			.setDesc(this.plugin.t("settingTtsProviderDesc"))
+			.addDropdown((dropdown) => {
+				for (const [id, p] of Object.entries(TTS_PROVIDERS)) {
+					const label = this.plugin.getInterfaceLanguage() === "zh" ? p.name : p.nameEn;
+					dropdown.addOption(id, label);
+				}
+				dropdown.setValue(this.plugin.settings.ttsProvider);
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.ttsProvider = value;
+					// Switch default voices when changing provider
+					const provider = TTS_PROVIDERS[value];
+					if (provider) {
+						this.plugin.settings.ttsVoices = provider.getDefaultVoices();
+						this.plugin.settings.ttsVoiceType = provider.getDefaultVoices()[0]?.voiceType || "";
+					}
+					await this.plugin.saveSettings();
+					this.renderSettings();
+				});
+			});
+
 		new Setting(containerEl)
 			.setName(this.plugin.t("settingTtsEnabledName"))
 			.setDesc(this.plugin.t("settingTtsEnabledDesc"))
@@ -2277,23 +2563,52 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 			);
 
 		if (this.plugin.settings.ttsEnabled) {
-			new Setting(containerEl)
-				.setName(this.plugin.t("settingTtsAccessKeyName"))
-				.addText((text) => {
-					text.inputEl.type = "password";
-					text.setValue(this.plugin.settings.ttsAccessKey).onChange(async (value) => {
-						this.plugin.settings.ttsAccessKey = value.trim();
-						await this.plugin.saveSettings();
+			if (this.plugin.settings.ttsProvider !== "edge-tts") {
+				new Setting(containerEl)
+					.setName(this.plugin.t("settingTtsAccessKeyName"))
+					.addText((text) => {
+						text.inputEl.type = "password";
+						text.setValue(this.plugin.settings.ttsAccessKey).onChange(async (value) => {
+							this.plugin.settings.ttsAccessKey = value.trim();
+							await this.plugin.saveSettings();
+						});
+					})
+					.then((setting) => {
+						const provider = this.plugin.getCurrentProvider();
+						setting.descEl.appendText(this.plugin.t("settingTtsAccessKeyDesc") + " ");
+						const keyUrl = provider.getApiKeyUrl();
+						if (keyUrl) {
+							const link = setting.descEl.createEl("a", {
+								text: this.plugin.t("settingTtsGetKeyLink"),
+								href: keyUrl
+							});
+							link.setAttr("target", "_blank");
+						}
 					});
-				})
-				.then((setting) => {
-					setting.descEl.appendText(this.plugin.t("settingTtsAccessKeyDesc") + " ");
-					const link = setting.descEl.createEl("a", {
-						text: this.plugin.t("settingTtsGetKeyLink"),
-						href: "https://console.volcengine.com/speech/new/experience/tts?projectName=default"
-					});
-					link.setAttr("target", "_blank");
-				});
+			}
+
+				// Volcengine-specific: resource ID and API URL (hidden for other providers)
+				if (this.plugin.settings.ttsProvider === "volcengine") {
+					new Setting(containerEl)
+						.setName("Resource ID")
+						.setDesc("volc.service_type.10029 / seed-tts-2.0 / seed-icl-2.0")
+						.addText((text) =>
+							text.setValue(this.plugin.settings.ttsResourceId).onChange(async (value) => {
+								this.plugin.settings.ttsResourceId = value.trim();
+								await this.plugin.saveSettings();
+							})
+						);
+
+					new Setting(containerEl)
+						.setName("API URL")
+						.setDesc("TTS endpoint URL")
+						.addText((text) =>
+							text.setValue(this.plugin.settings.ttsApiUrl).onChange(async (value) => {
+								this.plugin.settings.ttsApiUrl = value.trim();
+								await this.plugin.saveSettings();
+							})
+						);
+				}
 
 			new Setting(containerEl).setName(this.plugin.t("settingTtsVoiceLibraryName")).setHeading();
 			const voiceListEl = containerEl.createDiv({ cls: "n2h-voice-list" });
@@ -2427,7 +2742,8 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 		restoreBtn.addEventListener("click", () => {
 			void (async () => {
 				const existing = new Set(this.plugin.settings.ttsVoices.map((v) => v.voiceType));
-				for (const v of DEFAULT_TTS_VOICES) {
+				const providerVoices = this.plugin.settings.ttsProvider === "volcengine" ? VOLCENGINE_DEFAULT_VOICES : this.plugin.settings.ttsProvider === "edge-tts" ? EDGE_TTS_DEFAULT_VOICES : BOSON_DEFAULT_VOICES;
+				for (const v of providerVoices) {
 					if (!existing.has(v.voiceType)) this.plugin.settings.ttsVoices.push({ ...v });
 				}
 				await this.plugin.saveSettings();
@@ -3576,7 +3892,7 @@ const FLOATING_TOC_JS = `
 const WIDTH_ADJUST_JS = `
 (function() {
 	// DEF must match the --read-width default declared in :root in the CSS above.
-	var MIN = 600, DEF = 720, STEP = 40, KEY = "notes-to-html-pages:read-width";
+	var MIN = 600, DEF = 720, STEP = 40, KEY = "notes-to-html-pages-boson:read-width";
 	var root = document.documentElement;
 	function maxW() { var w = window.innerWidth || 1440; return Math.min(w - 64, 1400); }
 	function clamp(px) { return Math.max(MIN, Math.min(maxW(), px)); }
@@ -3673,8 +3989,60 @@ const TTS_PLAYER_JS = `
 			}
 		});
 
-		var pos = -1;   // index into order[]
+		var pos = -1;
 		var rate = 1;
+
+		// Resume support
+		var STORAGE_KEY = "tts-resume:" + (window.location.pathname || document.title || "default");
+
+		function saveProgress() {
+			if (pos < 0) return;
+			try {
+				localStorage.setItem(STORAGE_KEY, JSON.stringify({ idx: order[pos], pos: pos, updated: Date.now() }));
+			} catch (e) {}
+		}
+
+		function clearProgress() {
+			try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+		}
+
+		function checkResume() {
+			try {
+				var saved = localStorage.getItem(STORAGE_KEY);
+				if (!saved) return;
+				var data = JSON.parse(saved);
+				if (typeof data.pos !== "number" || data.pos < 0 || data.pos >= order.length) {
+					clearProgress(); return;
+				}
+				if (data.idx !== undefined && audioByIdx[data.idx] === undefined) {
+					clearProgress(); return;
+				}
+				showResumeBar(data.pos);
+			} catch (e) {}
+		}
+
+		function showResumeBar(targetPos) {
+			var bar = document.getElementById("tts-resume-wrap");
+			if (bar) return;
+			bar = document.createElement("div");
+			bar.id = "tts-resume-wrap";
+			bar.style.cssText = "position:sticky;top:0;z-index:100;background:var(--primary,#17B726);color:#fff;text-align:center;padding:8px 12px;font-size:14px;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;";
+			bar.innerHTML = "<span>\u{1F3A7} \u4e0a\u6b21\u64ad\u653e\u5230\u7b2c" + (targetPos + 1) + "/" + order.length + "\u53e5</span>"
+				+ "<button id=\"tts-resume-btn\" style=\"background:#fff;color:var(--primary,#17B726);border:none;border-radius:4px;padding:4px 16px;cursor:pointer;font-size:13px;font-weight:600;\">\u7ee7\u7eed\u64ad\u653e</button>"
+				+ "<button id=\"tts-resume-close\" style=\"background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);border-radius:4px;padding:4px 8px;cursor:pointer;font-size:12px;\">\u00d7</button>";
+			var main = document.querySelector("main.page") || document.body;
+			main.insertBefore(bar, main.firstChild);
+
+			document.getElementById("tts-resume-btn").addEventListener("click", function() {
+				bar.remove();
+				clearProgress();
+				loadPos(targetPos, true);
+			});
+			document.getElementById("tts-resume-close").addEventListener("click", function() {
+				bar.remove();
+				clearProgress();
+			});
+		}
 
 		function highlight(idx) {
 			Object.keys(spanByIdx).forEach(function(k) { spanByIdx[k].classList.remove("tts-active"); });
@@ -3696,10 +4064,11 @@ const TTS_PLAYER_JS = `
 			highlight(-1);
 			document.body.classList.remove("tts-playing");
 			if (player) player.classList.remove("is-playing");
-			playBtn.textContent = "\\u25B6";
+			playBtn.textContent = "\u25B6";
 			if (progressBar) progressBar.style.width = "0%";
 			pos = -1;
 			if (timeEl) timeEl.textContent = "0 / " + order.length;
+			clearProgress();
 		}
 
 		function loadPos(p, autoplay) {
@@ -3728,18 +4097,22 @@ const TTS_PLAYER_JS = `
 		});
 
 		audio.addEventListener("play", function() {
-			playBtn.textContent = "\\u275A\\u275A";
+			playBtn.textContent = "\u275A\u275A";
 			document.body.classList.add("tts-playing");
 			if (player) player.classList.add("is-playing");
 		});
 		audio.addEventListener("pause", function() {
-			if (!audio.ended) playBtn.textContent = "\\u25B6";
+			if (!audio.ended) playBtn.textContent = "\u25B6";
 			if (player) player.classList.remove("is-playing");
+			saveProgress();
 		});
 		audio.addEventListener("timeupdate", updateProgress);
 		audio.addEventListener("ended", function() {
-			if (pos + 1 < order.length) loadPos(pos + 1, true);
-			else stopAll();
+			if (pos + 1 < order.length) {
+				loadPos(pos + 1, true);
+			} else {
+				stopAll();
+			}
 		});
 
 		if (progressWrap) {
@@ -3767,9 +4140,6 @@ const TTS_PLAYER_JS = `
 			});
 		}
 
-		// --- floating show / hide -------------------------------------------
-		// pinnedCollapsed is sticky: once the user manually collapses, scrolling
-		// up will not auto-reveal the capsule until they tap the handle.
 		var pinnedCollapsed = false;
 		function setCollapsed(on) {
 			if (!player) return;
@@ -3794,11 +4164,8 @@ const TTS_PLAYER_JS = `
 			var y = window.pageYOffset || document.documentElement.scrollTop || 0;
 			var dy = y - lastY;
 			if (Math.abs(dy) > 6) {
-				if (dy > 0 && y > 80) {
-					setCollapsed(true);              // scrolling down -> hide
-				} else if (dy < 0 && !pinnedCollapsed) {
-					setCollapsed(false);             // scrolling up -> reveal
-				}
+				if (dy > 0 && y > 80) setCollapsed(true);
+				else if (dy < 0 && !pinnedCollapsed) setCollapsed(false);
 				lastY = y;
 			}
 			ticking = false;
@@ -3811,6 +4178,7 @@ const TTS_PLAYER_JS = `
 		}, { passive: true });
 
 		if (timeEl) timeEl.textContent = "0 / " + order.length;
+		checkResume();
 	});
 })();
-`.trim();
+`.trim()
