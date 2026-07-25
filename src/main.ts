@@ -580,6 +580,86 @@ const EDGE_TTS_DEFAULT_VOICES: TtsVoice[] = [
  * Returns MP3 bytes as Uint8Array.
  */
 async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Array> {
+	// Strategy 1: Python edge-tts via child_process (most reliable)
+	try {
+		return await edgeTtsViaPython(text, voice);
+	} catch (_e) {
+		// Strategy 2: Browser WebSocket (may fail due to Origin header restriction)
+		return edgeTtsViaWebSocket(text, voice);
+	}
+}
+
+/**
+ * Call Python edge-tts via child_process.
+ * Requires Python + edge_tts package installed.
+ */
+async function edgeTtsViaPython(text: string, voice: string): Promise<Uint8Array> {
+	const cp: any = require("child_process");
+	const tmpDir = require("os").tmpdir();
+	const outFile = tmpDir + "\edge-tts-" + generateUUID() + ".mp3";
+	const textFile = tmpDir + "\edge-tts-" + generateUUID() + ".txt";
+	// Write text to a temp file to avoid shell escaping issues
+	require("fs").writeFileSync(textFile, text, "utf-8");
+	return new Promise<Uint8Array>((resolve, reject) => {
+		cp.execFile("python", [
+			"-m", "edge_tts",
+			"--file", textFile,
+			"--voice", voice,
+			"--write-media", outFile
+		], { timeout: 60000 }, async (err: any) => {
+			try { require("fs").unlinkSync(textFile); } catch (_) {}
+			if (err) {
+				try { require("fs").unlinkSync(outFile); } catch (_) {}
+				reject(new Error("edge-tts failed: " + err.message));
+				return;
+			}
+			try {
+				const data = require("fs").readFileSync(outFile);
+				try { require("fs").unlinkSync(outFile); } catch (_) {}
+				resolve(new Uint8Array(data));
+			} catch (e: any) {
+				reject(new Error("Failed to read edge-tts output: " + e.message));
+			}
+		});
+	});
+}
+
+/**
+ * Browser WebSocket approach (limited by Origin header).
+ * Kept as fallback for environments where Python is not available.
+ */
+/**
+ * SHA-256 hash for Edge TTS Sec-MS-GEC token.
+ */
+async function generateSecMsGec(): Promise<string> {
+	const WIN_EPOCH = 11644473600;
+	const TICK_INTERVAL = 10000000;
+	const ROUNDING = 300;
+	const now = Math.floor(Date.now() / 1000);
+	const windowsTicks = Math.floor((now + WIN_EPOCH) / ROUNDING) * ROUNDING * TICK_INTERVAL;
+	const hashInput = windowsTicks.toString() + EDGE_TTS_TOKEN;
+	const enc = new TextEncoder();
+	const hash = await crypto.subtle.digest("SHA-256", enc.encode(hashInput));
+	return Array.from(new Uint8Array(hash))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("")
+		.toUpperCase();
+}
+
+function edgeTtsTimestamp(): string {
+	const d = new Date();
+	const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+	const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return days[d.getUTCDay()] + " " + months[d.getUTCMonth()] + " " + pad(d.getUTCDate()) + " " + d.getUTCFullYear()
+		+ " " + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds())
+		+ " GMT+0000 (Coordinated Universal Time)";
+}
+
+/**
+ * Browser WebSocket approach (limited by Origin header).
+ * Kept as fallback for environments where Python is not available.
+ */async function edgeTtsViaWebSocket(text: string, voice: string): Promise<Uint8Array> {
 	const connId = generateUUID().replace(/-/g, "");
 	const reqId = connId;
 	const gecToken = await generateSecMsGec();
@@ -598,30 +678,20 @@ async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Arra
 		const timer = setTimeout(() => {
 			timedOut = true;
 			wss.close();
-			reject(new Error("Edge TTS timed out"));
+			reject(new Error("Edge TTS WebSocket timed out"));
 		}, 60000);
 		wss.onopen = () => {
 			const CRLF = String.fromCharCode(13, 10);
-			const configBody = JSON.stringify({
-				context: {
-					synthesis: {
-						audio: {
-							metadataoptions: {
-								sentenceBoundaryEnabled: false,
-								wordBoundaryEnabled: false,
-							},
-							outputFormat: "audio-24khz-48kbitrate-mono-mp3",
-						},
-					},
-				},
-			});
+			const configBody = '{"context":{"synthesis":{"audio":{"metadataoptions":{' +
+				'"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"' +
+				'},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}';
 			wss.send("X-Timestamp:" + tsStr + CRLF + "Content-Type:application/json; charset=utf-8" + CRLF + "Path:speech.config" + CRLF + CRLF + configBody + CRLF);
 			const lang = voice.match(/^[a-z]{2}-[A-Z]{2}/)?.[0] || "zh-CN";
-			const ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='" + lang + "'>"
-				+ "<voice name='" + voice + "'>"
-				+ "<prosody pitch='+0Hz' rate='+0%' volume='+0%'>"
-				+ text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;").replace(/"/g, "&quot;")
-				+ "</prosody></voice></speak>";
+			const ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='" + lang + "'>" +
+				"<voice name='" + voice + "'>" +
+				"<prosody pitch='+0Hz' rate='+0%' volume='+0%'>" +
+				text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;").replace(/"/g, "&quot;") +
+				"</prosody></voice></speak>";
 			wss.send("X-RequestId:" + reqId + CRLF + "Content-Type:application/ssml+xml" + CRLF + "X-Timestamp:" + tsStr + "Z" + CRLF + "Path:ssml" + CRLF + CRLF + ssml);
 		};
 		wss.onmessage = (event: any) => {
@@ -672,42 +742,11 @@ async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Arra
 				for (const chunk of audioChunks) { out.set(chunk, offset); offset += chunk.length; }
 				resolve(out);
 			} else if (!timedOut) {
-				const reason = evt.reason ? " (" + evt.reason + ")" : "";
-				reject(new Error("Edge TTS closed (code=" + evt.code + reason + ")"));
+				reject(new Error("Edge TTS closed (code=" + evt.code + ")"));
 			}
 		};
 	});
-}
-
-function edgeTtsTimestamp(): string {
-	// Python edge-tts format: "Sat Jul 26 2025 12:34:56 GMT+0000 (Coordinated Universal Time)"
-	const d = new Date();
-	const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-	const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-	const pad = (n: number) => String(n).padStart(2, "0");
-	return days[d.getUTCDay()] + " " + months[d.getUTCMonth()] + " " + pad(d.getUTCDate()) + " " + d.getUTCFullYear()
-		+ " " + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds())
-		+ " GMT+0000 (Coordinated Universal Time)";
-}
-
-async function generateSecMsGec(): Promise<string> {
-	const WIN_EPOCH = 11644473600;
-	const TICK_INTERVAL = 10000000;
-	const ROUNDING = 300;
-	const now = Math.floor(Date.now() / 1000);
-	const windowsTicks = Math.floor((now + WIN_EPOCH) / ROUNDING) * ROUNDING * TICK_INTERVAL;
-	const hashInput = windowsTicks.toString() + EDGE_TTS_TOKEN;
-	const enc = new TextEncoder();
-	const hash = await crypto.subtle.digest("SHA-256", enc.encode(hashInput));
-	return Array.from(new Uint8Array(hash))
-		.map((b) => b.toString(16).padStart(2, "0"))
-		.join()
-		.toUpperCase();
-}
-
-
-
-const edgeTtsProvider: TtsProvider = {
+}const edgeTtsProvider: TtsProvider = {
 	id: "edge-tts",
 	name: "Edge TTS (免费)",
 	nameEn: "Edge TTS (Free)",
