@@ -4096,8 +4096,11 @@ const TTS_PLAYER_JS = `
 		var pos = -1;
 		var rate = 1;
 
-		// Resume support
-		var STORAGE_KEY = "tts-resume:" + (window.location.pathname || document.title || "default");
+				// Play history & resume support
+		var STORAGE_KEY = "tts:" + (window.location.pathname || document.title || "default");
+
+
+
 
 		function saveProgress() {
 			if (pos < 0) return;
@@ -4109,6 +4112,7 @@ const TTS_PLAYER_JS = `
 		function clearProgress() {
 			try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
 		}
+
 
 		function checkResume() {
 			try {
@@ -4125,30 +4129,34 @@ const TTS_PLAYER_JS = `
 			} catch (e) {}
 		}
 
-		function showResumeBar(targetPos) {
+				function showResumeBar(targetPos) {
 			var bar = document.getElementById("tts-resume-wrap");
 			if (bar) return;
 			bar = document.createElement("div");
 			bar.id = "tts-resume-wrap";
-			bar.style.cssText = "position:sticky;top:0;z-index:100;background:var(--primary,#17B726);color:#fff;text-align:center;padding:8px 12px;font-size:14px;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;";
-			bar.innerHTML = "<span>\u{1F3A7} \u4e0a\u6b21\u64ad\u653e\u5230\u7b2c" + (targetPos + 1) + "/" + order.length + "\u53e5</span>"
-				+ "<button id=\"tts-resume-btn\" style=\"background:#fff;color:var(--primary,#17B726);border:none;border-radius:4px;padding:4px 16px;cursor:pointer;font-size:13px;font-weight:600;\">\u7ee7\u7eed\u64ad\u653e</button>"
-				+ "<button id=\"tts-resume-close\" style=\"background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);border-radius:4px;padding:4px 8px;cursor:pointer;font-size:12px;\">\u00d7</button>";
+			bar.style.cssText = "position:sticky;top:0;z-index:100;background:var(--primary,#17B726);color:#fff;padding:10px 14px;font-size:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;";
+			bar.innerHTML = "<span>▶ 上次播放到第" + (targetPos + 1) + "/" + order.length + "句</span>" +
+				"<div style=\"display:flex;gap:8px;\">" +
+				"<button id=\"tts-resume-btn\" style=\"background:#fff;color:var(--primary,#17B726);border:none;border-radius:4px;padding:5px 18px;cursor:pointer;font-size:13px;font-weight:600;\">继续播放</button>" +
+				"<button id=\"tts-resume-close\" style=\"background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.4);border-radius:4px;padding:5px 10px;cursor:pointer;font-size:12px;\">&times;</button>" +
+				"</div>";
 			var main = document.querySelector("main.page") || document.body;
 			main.insertBefore(bar, main.firstChild);
 
 			document.getElementById("tts-resume-btn").addEventListener("click", function() {
 				bar.remove();
-				clearProgress();
 				loadPos(targetPos, true);
+				// Scroll to the target sentence
+				if (order[targetPos] !== undefined && spanByIdx[order[targetPos]]) {
+					spanByIdx[order[targetPos]].scrollIntoView({ behavior: "smooth", block: "center" });
+				}
 			});
 			document.getElementById("tts-resume-close").addEventListener("click", function() {
 				bar.remove();
 				clearProgress();
 			});
 		}
-
-		function highlight(idx) {
+function highlight(idx) {
 			Object.keys(spanByIdx).forEach(function(k) { spanByIdx[k].classList.remove("tts-active"); });
 			if (idx >= 0 && spanByIdx[idx]) {
 				spanByIdx[idx].classList.add("tts-active");
