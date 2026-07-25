@@ -17,10 +17,6 @@ import {
 	setIcon
 } from "obsidian";
 
-// Edge TWS WebSocket with custom headers (ws module, Node.js only)
-let EdgeWsImpl: any = null;
-try { EdgeWsImpl = require("ws"); } catch (_e) {}
-
 // Bundled at build time as a base64 data URI (esbuild "dataurl" loader), so the
 // loading animation ships inside main.js and works for store-installed users —
 // Obsidian only delivers main.js/manifest.json/styles.css, not extra asset files.
@@ -594,22 +590,7 @@ async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Arra
 			+ "&ConnectionId=" + connId
 			+ "&Sec-MS-GEC=" + gecToken
 			+ "&Sec-MS-GEC-Version=" + SEC_MS_GEC_VERSION;
-		let wss: WebSocket | any;
-		let isNodeWs = false;
-		if (EdgeWsImpl) {
-			wss = new EdgeWsImpl.WebSocket(url, undefined, {
-				handshakeTimeout: 15000,
-				headers: {
-					"Pragma": "no-cache",
-					"Cache-Control": "no-cache",
-					"Origin": "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
-					"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
-				},
-			});
-			isNodeWs = true;
-		} else {
-			wss = new WebSocket(url);
-		}
+		const wss = new WebSocket(url);
 		wss.binaryType = "arraybuffer";
 		const audioChunks: Uint8Array[] = [];
 		let timedOut = false;
@@ -769,9 +750,9 @@ interface TtsClip {
 export default class ReadableHtmlExporterPlugin extends Plugin {
 	settings: ReadableHtmlSettings = DEFAULT_SETTINGS;
 	private markdown!: MarkdownIt;
-	private ttsGenerationCounter = 0;
-	/** Set of generation IDs that have been cancelled (supports parallel exports) */
-	private ttsCancelledGens = new Set<number>();
+	private ttsGenerationId = 0;
+	/** Tracks active TTS generations: Map<id, active>. Supports parallel exports. */
+	private ttsGenerations = new Map<number, boolean>();
 
 	getCurrentProvider(): TtsProvider {
 		return TTS_PROVIDERS[this.settings.ttsProvider] || TTS_PROVIDERS.volcengine;
@@ -829,7 +810,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			name: this.t("commandCancelTts"),
 			callback: () => {
 				// Cancel all active generations
-					for (const id of Array.from(this.ttsCancelledGens)) this.ttsCancelledGens.add(id);
+					for (const [k] of this.ttsGenerations) this.ttsGenerations.set(k, false);
 				new Notice(this.t("noticeTtsCancelled"));
 			}
 		});
@@ -1143,8 +1124,8 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			const { sentences, html: wrappedBody } = this.splitAndWrapSentences(body);
 			if (sentences.length > 0) {
 				// Cancel all active generations
-					for (const id of Array.from(this.ttsCancelledGens)) this.ttsCancelledGens.add(id);
-				const currentGenId = this.ttsGenerationCounter;
+					for (const [k] of this.ttsGenerations) this.ttsGenerations.set(k, false);
+				const currentGenId = this.ttsGenerationId;
 				try {
 					const clips = await this.generateTtsPlaylist(sentences, currentGenId);
 
@@ -1363,7 +1344,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		const descEl = textWrap.createDiv({ cls: "n2h-progress-desc" });
 		const cancelBtn = head.createEl("button", { cls: "n2h-progress-cancel", text: this.t("ttsCancel") });
 		cancelBtn.addEventListener("click", () => {
-			this.ttsCancelledGens.add(generationId);
+			this.ttsGenerations.set(generationId, false);
 		});
 		const track = root.createDiv({ cls: "n2h-progress-track" });
 		const fill = track.createDiv({ cls: "n2h-progress-fill" });
@@ -1375,7 +1356,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 
 		try {
 			for (let i = 0; i < sentences.length; i++) {
-				if (this.ttsCancelledGens.has(generationId)) {
+				if (this.ttsGenerations.has(generationId)) {
 					throw new Error("TTS generation cancelled");
 				}
 
@@ -1390,7 +1371,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 					}
 					clips.push({ idx: i, audio: this.bytesToBase64(bytes) });
 				} catch (err) {
-					if (this.ttsCancelledGens.has(generationId)) {
+					if (this.ttsGenerations.get(generationId) === false) {
 						throw new Error("TTS generation cancelled");
 					}
 					console.error(`TTS failed for sentence ${i}:`, err);
