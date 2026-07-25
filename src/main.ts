@@ -84,6 +84,10 @@ const UI_TEXT: Record<UiLanguage, Record<string, string>> = {
 		settingTtsEnabledName: "启用语音伴读",
 		settingTtsProviderName: "语音服务商",
 		settingTtsProviderDesc: "选择语音合成服务商。切换后音色列表会自动替换为该服务商的默认音色。",
+		settingBosonRefAudioName: "参考音频 URL",
+		settingBosonRefAudioDesc: "用于音色克隆的参考音频 URL（http 或 data URI），留空则使用预设音色。仅 Boson 支持。",
+		settingBosonRefTextName: "参考音频转录文本",
+		settingBosonRefTextDesc: "参考音频的逐字转录文本（可选，但推荐提供以提升克隆质量）。",
 		settingTtsEnabledDesc: "导出时调用语音合成 API 生成音频并嵌入 HTML，支持逐句高亮。",
 		settingTtsAccessKeyName: "API Key",
 		settingTtsAccessKeyDesc: "API Key。",
@@ -168,6 +172,10 @@ const UI_TEXT: Record<UiLanguage, Record<string, string>> = {
 		settingTtsEnabledName: "Enable Read Along",
 		settingTtsProviderName: "TTS Provider",
 		settingTtsProviderDesc: "Select a TTS provider. Switching will replace the voice list with the provider's default voices.",
+		settingBosonRefAudioName: "Reference Audio URL",
+		settingBosonRefAudioDesc: "URL (http or data URI) of reference audio for voice cloning. Leave empty for preset voices. Boson only.",
+		settingBosonRefTextName: "Reference Audio Transcript",
+		settingBosonRefTextDesc: "Verbatim transcript of the reference audio (optional, but recommended for better clone quality).",
 		settingTtsEnabledDesc: "Generate speech audio on export via TTS API and embed it with sentence highlighting.",
 		settingTtsAccessKeyName: "API Key",
 		settingTtsAccessKeyDesc: "API Key for the TTS service.",
@@ -217,6 +225,8 @@ interface ReadableHtmlSettings {
 	insertLinkInSource: boolean;
 	ttsEnabled: boolean;
 	ttsProvider: string;
+	bosonRefAudio: string;
+	bosonRefText: string;
 	ttsAppId: string;
 	ttsAccessKey: string;
 	ttsResourceId: string;
@@ -257,6 +267,8 @@ const DEFAULT_SETTINGS: ReadableHtmlSettings = {
 	insertLinkInSource: true,
 	ttsEnabled: false,
 	ttsProvider: "volcengine",
+	bosonRefAudio: "",
+	bosonRefText: "",
 	ttsAppId: "",
 	ttsAccessKey: "",
 	ttsResourceId: "volc.service_type.10029",
@@ -277,7 +289,7 @@ interface TtsProvider {
 	readonly name: string;
 	readonly nameEn: string;
 
-	call(apiKey: string, text: string, voiceType: string): Promise<Uint8Array>;
+	call(apiKey: string, text: string, voiceType: string, refAudio?: string, refText?: string): Promise<Uint8Array>;
 
 	getDefaultVoices(): TtsVoice[];
 
@@ -302,7 +314,7 @@ const volcengineProvider: TtsProvider = {
 	name: "火山引擎",
 	nameEn: "Volcengine",
 
-	async call(apiKey: string, text: string, voiceType: string): Promise<Uint8Array> {
+	async call(apiKey: string, text: string, voiceType: string, _refAudio?: string, _refText?: string): Promise<Uint8Array> {
 		const candidates = resourceCandidates(voiceType);
 		let lastErr: Error | null = null;
 		for (const rid of candidates) {
@@ -486,13 +498,19 @@ const bosonProvider: TtsProvider = {
 	name: "Boson Higgs TTS",
 	nameEn: "Boson Higgs TTS",
 
-	async call(apiKey: string, text: string, voiceType: string): Promise<Uint8Array> {
-		const body = JSON.stringify({
+	async call(apiKey: string, text: string, voiceType: string, refAudio?: string, refText?: string): Promise<Uint8Array> {
+		const bodyObj: Record<string, unknown> = {
 			model: "higgs-tts-3",
 			input: text,
-			voice: voiceType,
 			response_format: "mp3"
-		});
+		};
+		if (refAudio) {
+			bodyObj.ref_audio = refAudio;
+			if (refText) bodyObj.ref_text = refText;
+		} else {
+			bodyObj.voice = voiceType;
+		}
+		const body = JSON.stringify(bodyObj);
 
 		const resp = await requestUrl({
 			url: "https://api.boson.ai/v1/audio/speech",
@@ -538,6 +556,7 @@ const bosonProvider: TtsProvider = {
  */
 const EDGE_TTS_HOST = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1";
 const EDGE_TTS_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+const SEC_MS_GEC_VERSION = "1-143.0.3650.75";
 
 const EDGE_TTS_DEFAULT_VOICES: TtsVoice[] = [
 	{ name: "晓晓 (女)", voiceType: "zh-CN-XiaoxiaoNeural", style: "女声 · 亲切自然", hue: 330, recommended: true },
@@ -560,29 +579,29 @@ const EDGE_TTS_DEFAULT_VOICES: TtsVoice[] = [
  * Returns MP3 bytes as Uint8Array.
  */
 async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Array> {
-	const connId = generateUUID();
-	const url = EDGE_TTS_HOST
-		+ "?trustedclienttoken=" + EDGE_TTS_TOKEN
-		+ "&connectionId=" + connId;
-
+	const connId = generateUUID().replace(/-/g, "");
+	const reqId = connId;
+	const timestamp = new Date().toUTCString().replace("GMT", "UTC");
+	const gecToken = await generateSecMsGec();
 	return new Promise<Uint8Array>((resolve, reject) => {
-		const ws = new WebSocket(url);
+		const ws = new WebSocket(
+			EDGE_TTS_HOST
+			+ "?TrustedClientToken=" + EDGE_TTS_TOKEN
+			+ "&ConnectionId=" + connId
+			+ "&Sec-MS-GEC=" + gecToken
+			+ "&Sec-MS-GEC-Version=" + SEC_MS_GEC_VERSION
+		);
 		const audioChunks: Uint8Array[] = [];
 		let timedOut = false;
 		let resolved = false;
-
 		const timer = setTimeout(() => {
 			timedOut = true;
 			ws.close();
 			reject(new Error("Edge TTS timed out"));
 		}, 30000);
-
 		ws.binaryType = "arraybuffer";
-
-		ws.binaryType = "arraybuffer";
-
 		ws.onopen = () => {
-			// Send audio config (must include headers for Edge TTS protocol)
+			const CRLF = String.fromCharCode(13, 10);
 			const configBody = JSON.stringify({
 				context: {
 					synthesis: {
@@ -596,47 +615,31 @@ async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Arra
 					},
 				},
 			});
-			ws.send("Content-Type:application/json; charset=utf-8" + String.fromCharCode(13,10) + "Path:speech.config" + String.fromCharCode(13,10,13,10) + configBody);
-
-			// Derive xml:lang from voice code (e.g. "zh-CN-XiaoxiaoNeural" -> "zh-CN")
+			ws.send("X-Timestamp:" + timestamp + CRLF + "Content-Type:application/json; charset=utf-8" + CRLF + "Path:speech.config" + CRLF + CRLF + configBody + CRLF);
 			const lang = voice.match(/^[a-z]{2}-[A-Z]{2}/)?.[0] || "zh-CN";
-
-			// Send SSML (with protocol headers)
-			const ssml = '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis"'
-				+ ' xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="' + lang + '">'
-				+ '<voice name="' + voice + '">'
-				+ '<prosody rate="0%" pitch="0%">'
+			const ssml = "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\""
+				+ " xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"" + lang + "\">"
+				+ "<voice name=\"" + voice + "\">"
+				+ "<prosody rate=\"0%\" pitch=\"0%\">"
 				+ text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
-				+ '</prosody>'
-				+ '</voice>'
-				+ '</speak>';
-			ws.send("Content-Type:application/ssml+xml" + String.fromCharCode(13,10) + "Path:ssml" + String.fromCharCode(13,10,13,10) + ssml);
+				+ "</prosody></voice></speak>";
+			ws.send("X-RequestId:" + reqId + CRLF + "Content-Type:application/ssml+xml" + CRLF + "X-Timestamp:" + timestamp + "Z" + CRLF + "Path:ssml" + CRLF + CRLF + ssml);
 		};
-
 		ws.onmessage = (event) => {
 			if (timedOut) return;
-
 			if (event.data instanceof ArrayBuffer) {
 				const bytes = new Uint8Array(event.data);
-				const separator = findDoubleCRLF(bytes);
-				if (separator >= 0) {
-					// Everything after header is audio
-					const audioData = bytes.subarray(separator + 4);
-					if (audioData.length > 0) {
-						audioChunks.push(audioData);
-					}
-				} else {
-					// No header separator - likely pure audio
-					audioChunks.push(bytes);
+				const headerLen = (bytes[0] << 8) | bytes[1];
+				const bodyStart = 2 + headerLen + 2;
+				if (bodyStart < bytes.length) {
+					audioChunks.push(bytes.subarray(bodyStart));
 				}
 			} else if (typeof event.data === "string") {
-				// Text message - check if it's the final "turn.end"
 				if (event.data.includes("turn.end")) {
 					clearTimeout(timer);
 					if (resolved) return;
 					resolved = true;
 					ws.close();
-					// Assemble all audio chunks
 					const total = audioChunks.reduce((s, c) => s + c.length, 0);
 					const out = new Uint8Array(total);
 					let offset = 0;
@@ -648,14 +651,12 @@ async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Arra
 				}
 			}
 		};
-
-		ws.onerror = (_err) => {
+		ws.onerror = () => {
 			clearTimeout(timer);
 			if (resolved) return;
 			resolved = true;
 			reject(new Error("Edge TTS WebSocket error"));
 		};
-
 		ws.onclose = (evt) => {
 			clearTimeout(timer);
 			if (resolved) return;
@@ -676,14 +677,19 @@ async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Arra
 	});
 }
 
-function findDoubleCRLF(bytes: Uint8Array): number {
-	for (let i = 0; i < bytes.length - 3; i++) {
-		if (bytes[i] === 0x0d && bytes[i + 1] === 0x0a
-			&& bytes[i + 2] === 0x0d && bytes[i + 3] === 0x0a) {
-			return i;
-		}
-	}
-	return -1;
+async function generateSecMsGec(): Promise<string> {
+	const WIN_EPOCH = 11644473600;
+	const TICK_INTERVAL = 10000000;
+	const ROUNDING = 300;
+	const now = Math.floor(Date.now() / 1000);
+	const windowsTicks = Math.floor((now + WIN_EPOCH) / ROUNDING) * ROUNDING * TICK_INTERVAL;
+	const hashInput = windowsTicks.toString() + EDGE_TTS_TOKEN;
+	const enc = new TextEncoder();
+	const hash = await crypto.subtle.digest("SHA-256", enc.encode(hashInput));
+	return Array.from(new Uint8Array(hash))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("")
+		.toUpperCase();
 }
 
 const edgeTtsProvider: TtsProvider = {
@@ -866,6 +872,12 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		}
 		if (typeof data.ttsProvider === "string") {
 			settings.ttsProvider = data.ttsProvider;
+		}
+		if (typeof data.bosonRefAudio === "string") {
+			settings.bosonRefAudio = data.bosonRefAudio;
+		}
+		if (typeof data.bosonRefText === "string") {
+			settings.bosonRefText = data.bosonRefText;
 		}
 		if (typeof data.ttsAccessKey === "string") {
 			settings.ttsAccessKey = data.ttsAccessKey;
@@ -1288,7 +1300,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		if (!speaker) {
 			throw new Error(this.t("ttsVoiceAddNeedId"));
 		}
-		return this.getCurrentProvider().call(this.settings.ttsAccessKey, "你好，这是配音音色测试。", speaker);
+		return this.getCurrentProvider().call(this.settings.ttsAccessKey, "你好，这是配音音色测试。", speaker, undefined, undefined);
 	}
 
 	private async generateTtsPlaylist(
@@ -1335,7 +1347,9 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 				setProgress(i + 1);
 
 				try {
-					const bytes = await provider.call(this.settings.ttsAccessKey, sentences[i], this.settings.ttsVoiceType);
+					const refAudio = provider.id === "boson" ? this.settings.bosonRefAudio || undefined : undefined;
+					const refText = provider.id === "boson" ? this.settings.bosonRefText || undefined : undefined;
+					const bytes = await provider.call(this.settings.ttsAccessKey, sentences[i], this.settings.ttsVoiceType, refAudio, refText);
 					if (bytes.length === 0) {
 						throw new Error("empty audio");
 					}
@@ -2587,7 +2601,7 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 					});
 			}
 
-				// Volcengine-specific: resource ID and API URL (hidden for other providers)
+				// Volcengine-specific: resource ID and API URL
 				if (this.plugin.settings.ttsProvider === "volcengine") {
 					new Setting(containerEl)
 						.setName("Resource ID")
@@ -2605,6 +2619,29 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 						.addText((text) =>
 							text.setValue(this.plugin.settings.ttsApiUrl).onChange(async (value) => {
 								this.plugin.settings.ttsApiUrl = value.trim();
+								await this.plugin.saveSettings();
+							})
+						);
+				}
+
+				// Boson-specific: voice cloning reference audio
+				if (this.plugin.settings.ttsProvider === "boson") {
+					new Setting(containerEl)
+						.setName(this.plugin.t("settingBosonRefAudioName"))
+						.setDesc(this.plugin.t("settingBosonRefAudioDesc"))
+						.addText((text) =>
+							text.setValue(this.plugin.settings.bosonRefAudio).onChange(async (value) => {
+								this.plugin.settings.bosonRefAudio = value.trim();
+								await this.plugin.saveSettings();
+							})
+						);
+
+					new Setting(containerEl)
+						.setName(this.plugin.t("settingBosonRefTextName"))
+						.setDesc(this.plugin.t("settingBosonRefTextDesc"))
+						.addText((text) =>
+							text.setValue(this.plugin.settings.bosonRefText).onChange(async (value) => {
+								this.plugin.settings.bosonRefText = value.trim();
 								await this.plugin.saveSettings();
 							})
 						);
