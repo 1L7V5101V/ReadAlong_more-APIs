@@ -1,6 +1,6 @@
 {
-	"id": "read-along-boson",
-	"name": "Read Along",
+	"id": "read-along-more-apis",
+	"name": "Read Along (More APIs)",
 	"version": "0.5.8",
 	"minAppVersion": "1.5.0",
 	"description": "把 Markdown 笔记变成「边听边读」逐句朗读、读到哪句高亮哪句的网页；支持语音伴读与听读。Export notes into clean, offline-readable pages with optional Read Along — sentence-by-sentence TTS narration and synced highlighting.",

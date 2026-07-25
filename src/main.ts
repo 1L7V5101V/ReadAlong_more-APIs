@@ -21,7 +21,7 @@ import {
 // Obsidian only delivers main.js/manifest.json/styles.css, not extra asset files.
 import LOADER_GIF_URI from "../chat-d.gif";
 
-const VIEW_TYPE_READABLE_HTML = "notes-to-html-pages-boson-html-view";
+const VIEW_TYPE_READABLE_HTML = "notes-to-html-pages-more-apis-html-view";
 
 type HtmlStylePreset = "clean";
 type UiLanguage = "zh" | "en";
@@ -347,7 +347,7 @@ async function callVolcengine(
 ): Promise<Uint8Array> {
 	const reqId = generateUUID();
 	const body = JSON.stringify({
-		user: { uid: "notes-to-html-pages-boson" },
+		user: { uid: "notes-to-html-pages-more-apis" },
 		req_params: {
 			text,
 			speaker,
@@ -1162,7 +1162,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			"<head>",
 			'<meta charset="utf-8">',
 			'<meta name="viewport" content="width=device-width, initial-scale=1">',
-			`<meta name="notes-to-html-pages-boson-style" content="${stylePreset}">`,
+			`<meta name="notes-to-html-pages-more-apis-style" content="${stylePreset}">`,
 			`<title>${this.escapeHtml(title)}</title>`,
 			`<style>${this.getStyleCss(stylePreset)}</style>`,
 			ttsDataTag,
@@ -3892,7 +3892,7 @@ const FLOATING_TOC_JS = `
 const WIDTH_ADJUST_JS = `
 (function() {
 	// DEF must match the --read-width default declared in :root in the CSS above.
-	var MIN = 600, DEF = 720, STEP = 40, KEY = "notes-to-html-pages-boson:read-width";
+	var MIN = 600, DEF = 720, STEP = 40, KEY = "notes-to-html-pages-more-apis:read-width";
 	var root = document.documentElement;
 	function maxW() { var w = window.innerWidth || 1440; return Math.min(w - 64, 1400); }
 	function clamp(px) { return Math.max(MIN, Math.min(maxW(), px)); }
