@@ -580,13 +580,8 @@ const EDGE_TTS_DEFAULT_VOICES: TtsVoice[] = [
  * Returns MP3 bytes as Uint8Array.
  */
 async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Array> {
-	// Strategy 1: Python edge-tts via child_process (most reliable)
-	try {
-		return await edgeTtsViaPython(text, voice);
-	} catch (_e) {
-		// Strategy 2: Browser WebSocket (may fail due to Origin header restriction)
-		return edgeTtsViaWebSocket(text, voice);
-	}
+	// Try Python edge-tts (the only reliable method for Edge TTS)
+	return edgeTtsViaPython(text, voice);
 }
 
 /**
@@ -598,27 +593,44 @@ async function edgeTtsViaPython(text: string, voice: string): Promise<Uint8Array
 	const tmpDir = require("os").tmpdir();
 	const outFile = tmpDir + "\edge-tts-" + generateUUID() + ".mp3";
 	const textFile = tmpDir + "\edge-tts-" + generateUUID() + ".txt";
-	// Write text to a temp file to avoid shell escaping issues
 	require("fs").writeFileSync(textFile, text, "utf-8");
 	return new Promise<Uint8Array>((resolve, reject) => {
-		cp.execFile("python", [
+		const timer = setTimeout(() => {
+			reject(new Error("edge-tts timed out (60s)"));
+		}, 60000);
+		const child = cp.execFile("python", [
 			"-m", "edge_tts",
 			"--file", textFile,
 			"--voice", voice,
 			"--write-media", outFile
-		], { timeout: 60000 }, async (err: any) => {
-			try { require("fs").unlinkSync(textFile); } catch (_) {}
+		], { timeout: 55000, maxBuffer: 50 * 1024 * 1024 }, (err: any) => {
+			clearTimeout(timer);
 			if (err) {
 				try { require("fs").unlinkSync(outFile); } catch (_) {}
+			try { require("fs").unlinkSync(textFile); } catch (_) {}
 				reject(new Error("edge-tts failed: " + err.message));
 				return;
 			}
 			try {
-				const data = require("fs").readFileSync(outFile);
-				try { require("fs").unlinkSync(outFile); } catch (_) {}
+				const fs = require("fs");
+				const stat = fs.statSync(outFile);
+				if (stat.size < 100) {
+					fs.unlinkSync(outFile);
+					reject(new Error("edge-tts returned empty or truncated audio (" + stat.size + " bytes)"));
+					return;
+				}
+				const data = fs.readFileSync(outFile);
+				fs.unlinkSync(outFile);
+				// Validate: MP3 should start with 0xFF 0xFx
+				if (data.length < 2 || data[0] !== 0xFF || (data[1] & 0xF0) !== 0xF0) {
+					reject(new Error("edge-tts returned invalid audio (bad MP3 header: " + data[0].toString(16) + " " + data[1].toString(16) + ")"));
+					return;
+				}
 				resolve(new Uint8Array(data));
 			} catch (e: any) {
-				reject(new Error("Failed to read edge-tts output: " + e.message));
+				try { require("fs").unlinkSync(outFile); } catch (_) {}
+			try { require("fs").unlinkSync(textFile); } catch (_) {}
+				reject(new Error("edge-tts output error: " + e.message));
 			}
 		});
 	});
