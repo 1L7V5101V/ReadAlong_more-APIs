@@ -4057,6 +4057,7 @@ const WIDTH_ADJUST_JS = `
 `;
 
 const TTS_PLAYER_JS = `
+
 (function() {
 	document.addEventListener("DOMContentLoaded", function() {
 		var audio = document.getElementById("tts-audio");
@@ -4093,70 +4094,10 @@ const TTS_PLAYER_JS = `
 			}
 		});
 
-		var pos = -1;
+		var pos = -1;   // index into order[]
 		var rate = 1;
 
-				// Play history & resume support
-		var STORAGE_KEY = "tts:" + (window.location.pathname || document.title || "default");
-
-
-
-
-		function saveProgress() {
-			if (pos < 0) return;
-			try {
-				localStorage.setItem(STORAGE_KEY, JSON.stringify({ idx: order[pos], pos: pos, updated: Date.now() }));
-			} catch (e) {}
-		}
-
-		function clearProgress() {
-			try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-		}
-
-
-		function checkResume() {
-			try {
-				var saved = localStorage.getItem(STORAGE_KEY);
-				if (!saved) return;
-				var data = JSON.parse(saved);
-				if (typeof data.pos !== "number" || data.pos < 0 || data.pos >= order.length) {
-					clearProgress(); return;
-				}
-				if (data.idx !== undefined && audioByIdx[data.idx] === undefined) {
-					clearProgress(); return;
-				}
-				showResumeBar(data.pos);
-			} catch (e) {}
-		}
-
-				function showResumeBar(targetPos) {
-			var bar = document.getElementById("tts-resume-wrap");
-			if (bar) return;
-			bar = document.createElement("div");
-			bar.id = "tts-resume-wrap";
-			bar.style.cssText = "position:sticky;top:0;z-index:100;background:var(--primary,#17B726);color:#fff;padding:10px 14px;font-size:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;";
-			bar.innerHTML = "<span>▶ 上次播放到第" + (targetPos + 1) + "/" + order.length + "句</span>" +
-				"<div style=\"display:flex;gap:8px;\">" +
-				"<button id=\"tts-resume-btn\" style=\"background:#fff;color:var(--primary,#17B726);border:none;border-radius:4px;padding:5px 18px;cursor:pointer;font-size:13px;font-weight:600;\">继续播放</button>" +
-				"<button id=\"tts-resume-close\" style=\"background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.4);border-radius:4px;padding:5px 10px;cursor:pointer;font-size:12px;\">&times;</button>" +
-				"</div>";
-			var main = document.querySelector("main.page") || document.body;
-			main.insertBefore(bar, main.firstChild);
-
-			document.getElementById("tts-resume-btn").addEventListener("click", function() {
-				bar.remove();
-				loadPos(targetPos, true);
-				// Scroll to the target sentence
-				if (order[targetPos] !== undefined && spanByIdx[order[targetPos]]) {
-					spanByIdx[order[targetPos]].scrollIntoView({ behavior: "smooth", block: "center" });
-				}
-			});
-			document.getElementById("tts-resume-close").addEventListener("click", function() {
-				bar.remove();
-				clearProgress();
-			});
-		}
-function highlight(idx) {
+		function highlight(idx) {
 			Object.keys(spanByIdx).forEach(function(k) { spanByIdx[k].classList.remove("tts-active"); });
 			if (idx >= 0 && spanByIdx[idx]) {
 				spanByIdx[idx].classList.add("tts-active");
@@ -4176,11 +4117,10 @@ function highlight(idx) {
 			highlight(-1);
 			document.body.classList.remove("tts-playing");
 			if (player) player.classList.remove("is-playing");
-			playBtn.textContent = "\u25B6";
+			playBtn.textContent = "\\u25B6";
 			if (progressBar) progressBar.style.width = "0%";
 			pos = -1;
 			if (timeEl) timeEl.textContent = "0 / " + order.length;
-			clearProgress();
 		}
 
 		function loadPos(p, autoplay) {
@@ -4209,22 +4149,18 @@ function highlight(idx) {
 		});
 
 		audio.addEventListener("play", function() {
-			playBtn.textContent = "\u275A\u275A";
+			playBtn.textContent = "\\u275A\\u275A";
 			document.body.classList.add("tts-playing");
 			if (player) player.classList.add("is-playing");
 		});
 		audio.addEventListener("pause", function() {
-			if (!audio.ended) playBtn.textContent = "\u25B6";
+			if (!audio.ended) playBtn.textContent = "\\u25B6";
 			if (player) player.classList.remove("is-playing");
-			saveProgress();
 		});
 		audio.addEventListener("timeupdate", updateProgress);
 		audio.addEventListener("ended", function() {
-			if (pos + 1 < order.length) {
-				loadPos(pos + 1, true);
-			} else {
-				stopAll();
-			}
+			if (pos + 1 < order.length) loadPos(pos + 1, true);
+			else stopAll();
 		});
 
 		if (progressWrap) {
@@ -4252,6 +4188,9 @@ function highlight(idx) {
 			});
 		}
 
+		// --- floating show / hide -------------------------------------------
+		// pinnedCollapsed is sticky: once the user manually collapses, scrolling
+		// up will not auto-reveal the capsule until they tap the handle.
 		var pinnedCollapsed = false;
 		function setCollapsed(on) {
 			if (!player) return;
@@ -4276,8 +4215,11 @@ function highlight(idx) {
 			var y = window.pageYOffset || document.documentElement.scrollTop || 0;
 			var dy = y - lastY;
 			if (Math.abs(dy) > 6) {
-				if (dy > 0 && y > 80) setCollapsed(true);
-				else if (dy < 0 && !pinnedCollapsed) setCollapsed(false);
+				if (dy > 0 && y > 80) {
+					setCollapsed(true);              // scrolling down -> hide
+				} else if (dy < 0 && !pinnedCollapsed) {
+					setCollapsed(false);             // scrolling up -> reveal
+				}
 				lastY = y;
 			}
 			ticking = false;
@@ -4290,7 +4232,7 @@ function highlight(idx) {
 		}, { passive: true });
 
 		if (timeEl) timeEl.textContent = "0 / " + order.length;
-		checkResume();
 	});
 })();
+
 `.trim()
