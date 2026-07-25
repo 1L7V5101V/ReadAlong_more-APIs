@@ -1208,7 +1208,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		const sentences: string[] = [];
 		let idx = 0;
 		const BOUNDARY = /[。！？；!?\n]/;
-		const blocks = scope.querySelectorAll("p, li, blockquote > p");
+		const blocks = scope.querySelectorAll("p, li, blockquote > p, h1, h2, h3, h4, h5, h6");
 
 		blocks.forEach((block) => {
 			if (block.closest("pre") || block.closest("code") || block.closest("table")) return;
