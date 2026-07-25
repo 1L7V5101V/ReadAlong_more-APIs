@@ -563,16 +563,6 @@ const EDGE_TTS_DEFAULT_VOICES: TtsVoice[] = [
 	{ name: "晓晓 (女)", voiceType: "zh-CN-XiaoxiaoNeural", style: "女声 · 亲切自然", hue: 330, recommended: true },
 	{ name: "云希 (男)", voiceType: "zh-CN-YunxiNeural", style: "男声 · 阳光活力", hue: 210 },
 	{ name: "云扬 (男)", voiceType: "zh-CN-YunyangNeural", style: "男声 · 新闻播报", hue: 150 },
-	{ name: "晓辰 (女)", voiceType: "zh-CN-XiaochenNeural", style: "女声 · 清新知性", hue: 300 },
-	{ name: "晓梦 (女)", voiceType: "zh-CN-XiaomengNeural", style: "女声 · 活泼可爱", hue: 20 },
-	{ name: "晓墨 (女)", voiceType: "zh-CN-XiaomoNeural", style: "女声 · 温柔", hue: 280 },
-	{ name: "晓颜 (女)", voiceType: "zh-CN-XiaoyanNeural", style: "女声 · 自然", hue: 260 },
-	{ name: "晓双 (女童)", voiceType: "zh-CN-XiaoshuangNeural", style: "女童 · 天真", hue: 50 },
-	{ name: "晓悠 (男童)", voiceType: "zh-CN-XiaoyouNeural", style: "男童 · 可爱", hue: 100 },
-	{ name: "云枫 (男)", voiceType: "zh-CN-YunfengNeural", style: "男声 · 沉稳", hue: 180 },
-	{ name: "Aria (英)", voiceType: "en-US-AriaNeural", style: "Female · natural, American", hue: 310 },
-	{ name: "Jenny (英)", voiceType: "en-US-JennyNeural", style: "Female · friendly, American", hue: 290 },
-	{ name: "Guy (英)", voiceType: "en-US-GuyNeural", style: "Male · confident, American", hue: 170 },
 ];
 
 /**

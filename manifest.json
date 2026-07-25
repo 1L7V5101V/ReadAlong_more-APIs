@@ -3,7 +3,7 @@
 	"name": "Read Along (More APIs)",
 	"version": "0.5.8",
 	"minAppVersion": "1.5.0",
-	"description": "把 Markdown 笔记变成「边听边读」逐句朗读、读到哪句高亮哪句的网页；支持语音伴读与听读。Export notes into clean, offline-readable pages with optional Read Along — sentence-by-sentence TTS narration and synced highlighting.",
+	"description": "把 Markdown 笔记变成「边听边读」逐句朗读、读到哪句高亮哪句的网页。支持多 TTS 服务商：火山引擎 / Boson Higgs TTS / Edge TTS（需安装 Python edge-tts 库）。Export notes with multi-provider TTS: Volcengine / Boson Higgs TTS / Edge TTS (requires Python edge-tts package).",
 	"author": "拔插头艺术家",
 	"authorUrl": "https://github.com/zebo101",
 	"isDesktopOnly": true
