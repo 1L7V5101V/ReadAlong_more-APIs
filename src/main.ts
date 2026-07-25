@@ -738,7 +738,9 @@ interface TtsClip {
 export default class ReadableHtmlExporterPlugin extends Plugin {
 	settings: ReadableHtmlSettings = DEFAULT_SETTINGS;
 	private markdown!: MarkdownIt;
-	private ttsGenerationId = 0;
+	private ttsGenerationCounter = 0;
+	/** Set of generation IDs that have been cancelled (supports parallel exports) */
+	private ttsCancelledGens = new Set<number>();
 
 	getCurrentProvider(): TtsProvider {
 		return TTS_PROVIDERS[this.settings.ttsProvider] || TTS_PROVIDERS.volcengine;
@@ -795,7 +797,8 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			id: "cancel-tts-generation",
 			name: this.t("commandCancelTts"),
 			callback: () => {
-				this.ttsGenerationId++;
+				// Cancel all active generations
+					for (const id of Array.from(this.ttsCancelledGens)) this.ttsCancelledGens.add(id);
 				new Notice(this.t("noticeTtsCancelled"));
 			}
 		});
@@ -1108,8 +1111,9 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		if (ttsEnabled) {
 			const { sentences, html: wrappedBody } = this.splitAndWrapSentences(body);
 			if (sentences.length > 0) {
-				this.ttsGenerationId++;
-				const currentGenId = this.ttsGenerationId;
+				// Cancel all active generations
+					for (const id of Array.from(this.ttsCancelledGens)) this.ttsCancelledGens.add(id);
+				const currentGenId = this.ttsGenerationCounter;
 				try {
 					const clips = await this.generateTtsPlaylist(sentences, currentGenId);
 
@@ -1328,7 +1332,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		const descEl = textWrap.createDiv({ cls: "n2h-progress-desc" });
 		const cancelBtn = head.createEl("button", { cls: "n2h-progress-cancel", text: this.t("ttsCancel") });
 		cancelBtn.addEventListener("click", () => {
-			this.ttsGenerationId++; // bump id → loop detects cancellation
+			this.ttsCancelledGens.add(generationId);
 		});
 		const track = root.createDiv({ cls: "n2h-progress-track" });
 		const fill = track.createDiv({ cls: "n2h-progress-fill" });
@@ -1340,7 +1344,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 
 		try {
 			for (let i = 0; i < sentences.length; i++) {
-				if (this.ttsGenerationId !== generationId) {
+				if (this.ttsCancelledGens.has(generationId)) {
 					throw new Error("TTS generation cancelled");
 				}
 
@@ -1355,7 +1359,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 					}
 					clips.push({ idx: i, audio: this.bytesToBase64(bytes) });
 				} catch (err) {
-					if (this.ttsGenerationId !== generationId) {
+					if (this.ttsCancelledGens.has(generationId)) {
 						throw new Error("TTS generation cancelled");
 					}
 					console.error(`TTS failed for sentence ${i}:`, err);
