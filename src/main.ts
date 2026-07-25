@@ -16,6 +16,11 @@ import {
 	requestUrl,
 	setIcon
 } from "obsidian";
+
+// Edge TWS WebSocket with custom headers (ws module, Node.js only)
+let EdgeWsImpl: any = null;
+try { EdgeWsImpl = require("ws"); } catch (_e) {}
+
 // Bundled at build time as a base64 data URI (esbuild "dataurl" loader), so the
 // loading animation ships inside main.js and works for store-installed users —
 // Obsidian only delivers main.js/manifest.json/styles.css, not extra asset files.
@@ -581,26 +586,40 @@ const EDGE_TTS_DEFAULT_VOICES: TtsVoice[] = [
 async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Array> {
 	const connId = generateUUID().replace(/-/g, "");
 	const reqId = connId;
-	const timestamp = new Date().toUTCString().replace("GMT", "UTC");
 	const gecToken = await generateSecMsGec();
+	const tsStr = edgeTtsTimestamp();
 	return new Promise<Uint8Array>((resolve, reject) => {
-		const ws = new WebSocket(
-			EDGE_TTS_HOST
+		const url = EDGE_TTS_HOST
 			+ "?TrustedClientToken=" + EDGE_TTS_TOKEN
 			+ "&ConnectionId=" + connId
 			+ "&Sec-MS-GEC=" + gecToken
-			+ "&Sec-MS-GEC-Version=" + SEC_MS_GEC_VERSION
-		);
+			+ "&Sec-MS-GEC-Version=" + SEC_MS_GEC_VERSION;
+		let wss: WebSocket | any;
+		let isNodeWs = false;
+		if (EdgeWsImpl) {
+			wss = new EdgeWsImpl.WebSocket(url, undefined, {
+				handshakeTimeout: 15000,
+				headers: {
+					"Pragma": "no-cache",
+					"Cache-Control": "no-cache",
+					"Origin": "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
+					"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+				},
+			});
+			isNodeWs = true;
+		} else {
+			wss = new WebSocket(url);
+		}
+		wss.binaryType = "arraybuffer";
 		const audioChunks: Uint8Array[] = [];
 		let timedOut = false;
 		let resolved = false;
 		const timer = setTimeout(() => {
 			timedOut = true;
-			ws.close();
+			wss.close();
 			reject(new Error("Edge TTS timed out"));
-		}, 30000);
-		ws.binaryType = "arraybuffer";
-		ws.onopen = () => {
+		}, 60000);
+		wss.onopen = () => {
 			const CRLF = String.fromCharCode(13, 10);
 			const configBody = JSON.stringify({
 				context: {
@@ -615,49 +634,53 @@ async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Arra
 					},
 				},
 			});
-			ws.send("X-Timestamp:" + timestamp + CRLF + "Content-Type:application/json; charset=utf-8" + CRLF + "Path:speech.config" + CRLF + CRLF + configBody + CRLF);
+			wss.send("X-Timestamp:" + tsStr + CRLF + "Content-Type:application/json; charset=utf-8" + CRLF + "Path:speech.config" + CRLF + CRLF + configBody + CRLF);
 			const lang = voice.match(/^[a-z]{2}-[A-Z]{2}/)?.[0] || "zh-CN";
-			const ssml = "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\""
-				+ " xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"" + lang + "\">"
-				+ "<voice name=\"" + voice + "\">"
-				+ "<prosody rate=\"0%\" pitch=\"0%\">"
-				+ text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+			const ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='" + lang + "'>"
+				+ "<voice name='" + voice + "'>"
+				+ "<prosody pitch='+0Hz' rate='+0%' volume='+0%'>"
+				+ text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;").replace(/"/g, "&quot;")
 				+ "</prosody></voice></speak>";
-			ws.send("X-RequestId:" + reqId + CRLF + "Content-Type:application/ssml+xml" + CRLF + "X-Timestamp:" + timestamp + "Z" + CRLF + "Path:ssml" + CRLF + CRLF + ssml);
+			wss.send("X-RequestId:" + reqId + CRLF + "Content-Type:application/ssml+xml" + CRLF + "X-Timestamp:" + tsStr + "Z" + CRLF + "Path:ssml" + CRLF + CRLF + ssml);
 		};
-		ws.onmessage = (event) => {
+		wss.onmessage = (event: any) => {
 			if (timedOut) return;
-			if (event.data instanceof ArrayBuffer) {
-				const bytes = new Uint8Array(event.data);
-				const headerLen = (bytes[0] << 8) | bytes[1];
-				const bodyStart = 2 + headerLen + 2;
-				if (bodyStart < bytes.length) {
-					audioChunks.push(bytes.subarray(bodyStart));
-				}
-			} else if (typeof event.data === "string") {
+			let buf: ArrayBuffer | null = null;
+			if (typeof event.data === "string") {
 				if (event.data.includes("turn.end")) {
 					clearTimeout(timer);
 					if (resolved) return;
 					resolved = true;
-					ws.close();
+					wss.close();
 					const total = audioChunks.reduce((s, c) => s + c.length, 0);
 					const out = new Uint8Array(total);
 					let offset = 0;
-					for (const chunk of audioChunks) {
-						out.set(chunk, offset);
-						offset += chunk.length;
-					}
+					for (const chunk of audioChunks) { out.set(chunk, offset); offset += chunk.length; }
 					resolve(out);
 				}
+				return;
+			}
+			if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
+				if (event.data instanceof Uint8Array) {
+					buf = event.data.buffer.slice(event.data.byteOffset, event.data.byteOffset + event.data.byteLength) as ArrayBuffer;
+				} else {
+					buf = event.data;
+				}
+			}
+			if (buf) {
+				const bytes = new Uint8Array(buf);
+				const headerLen = (bytes[0] << 8) | bytes[1];
+				const bodyStart = 2 + headerLen + 2;
+				if (bodyStart < bytes.length) audioChunks.push(bytes.subarray(bodyStart));
 			}
 		};
-		ws.onerror = () => {
+		wss.onerror = () => {
 			clearTimeout(timer);
 			if (resolved) return;
 			resolved = true;
-			reject(new Error("Edge TTS WebSocket error"));
+			reject(new Error("Edge TTS WebSocket failed"));
 		};
-		ws.onclose = (evt) => {
+		wss.onclose = (evt: any) => {
 			clearTimeout(timer);
 			if (resolved) return;
 			resolved = true;
@@ -665,16 +688,25 @@ async function edgeTtsSynthesize(text: string, voice: string): Promise<Uint8Arra
 				const total = audioChunks.reduce((s, c) => s + c.length, 0);
 				const out = new Uint8Array(total);
 				let offset = 0;
-				for (const chunk of audioChunks) {
-					out.set(chunk, offset);
-					offset += chunk.length;
-				}
+				for (const chunk of audioChunks) { out.set(chunk, offset); offset += chunk.length; }
 				resolve(out);
 			} else if (!timedOut) {
-				reject(new Error("Edge TTS closed (code=" + evt.code + ")"));
+				const reason = evt.reason ? " (" + evt.reason + ")" : "";
+				reject(new Error("Edge TTS closed (code=" + evt.code + reason + ")"));
 			}
 		};
 	});
+}
+
+function edgeTtsTimestamp(): string {
+	// Python edge-tts format: "Sat Jul 26 2025 12:34:56 GMT+0000 (Coordinated Universal Time)"
+	const d = new Date();
+	const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+	const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return days[d.getUTCDay()] + " " + months[d.getUTCMonth()] + " " + pad(d.getUTCDate()) + " " + d.getUTCFullYear()
+		+ " " + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds())
+		+ " GMT+0000 (Coordinated Universal Time)";
 }
 
 async function generateSecMsGec(): Promise<string> {
@@ -688,23 +720,22 @@ async function generateSecMsGec(): Promise<string> {
 	const hash = await crypto.subtle.digest("SHA-256", enc.encode(hashInput));
 	return Array.from(new Uint8Array(hash))
 		.map((b) => b.toString(16).padStart(2, "0"))
-		.join("")
+		.join()
 		.toUpperCase();
 }
+
+
 
 const edgeTtsProvider: TtsProvider = {
 	id: "edge-tts",
 	name: "Edge TTS (免费)",
 	nameEn: "Edge TTS (Free)",
-
-	async call(_apiKey: string, text: string, voiceType: string): Promise<Uint8Array> {
+	async call(_apiKey: string, text: string, voiceType: string, _refAudio?: string, _refText?: string): Promise<Uint8Array> {
 		return edgeTtsSynthesize(text, voiceType || "zh-CN-XiaoxiaoNeural");
 	},
-
 	getDefaultVoices(): TtsVoice[] {
 		return EDGE_TTS_DEFAULT_VOICES.map((v) => ({ ...v }));
 	},
-
 	getApiKeyUrl(): string {
 		return "";
 	}
