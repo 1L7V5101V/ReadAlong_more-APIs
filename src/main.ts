@@ -1395,7 +1395,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 
 		try {
 			for (let i = 0; i < sentences.length; i++) {
-				if (this.ttsGenerations.has(generationId)) {
+				if (this.ttsGenerations.get(generationId) === false) {
 					throw new Error("TTS generation cancelled");
 				}
 
