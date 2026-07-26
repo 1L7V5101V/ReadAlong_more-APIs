@@ -792,7 +792,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 	settings: ReadableHtmlSettings = DEFAULT_SETTINGS;
 	private markdown!: MarkdownIt;
 	private ttsGenerationId = 0;
-	/** Tracks active TTS generations: Map<id, active>. Supports parallel exports. */
+	/** Tracks active TTS generations: Map<id, cancelled?>. Supports parallel exports. */
 	private ttsGenerations = new Map<number, boolean>();
 
 	getCurrentProvider(): TtsProvider {
@@ -1081,7 +1081,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			return;
 		}
 
-		// Use Promise.allSettled for parallel export (faster for many files)
+		// Parallel export (faster for many files)
 		const results = await Promise.allSettled(files.map(async (file) => {
 			try {
 				await this.exportFile(file, false);
@@ -1164,9 +1164,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		if (ttsEnabled) {
 			const { sentences, html: wrappedBody } = this.splitAndWrapSentences(body);
 			if (sentences.length > 0) {
-				// Cancel all active generations
-					for (const [k] of this.ttsGenerations) this.ttsGenerations.set(k, false);
-				const currentGenId = this.ttsGenerationId;
+				const currentGenId = ++this.ttsGenerationId;
 				try {
 					const clips = await this.generateTtsPlaylist(sentences, currentGenId);
 
