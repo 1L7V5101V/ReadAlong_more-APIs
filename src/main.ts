@@ -93,9 +93,16 @@ const UI_TEXT: Record<UiLanguage, Record<string, string>> = {
 		settingTtsAccessKeyName: "API Key",
 		settingTtsAccessKeyDesc: "API Key。",
 		settingTtsGetKeyLink: "获取 API Key →",
+		settingBosonGenVoiceButton: "生成音色",
+		settingBosonGenVoiceDesc: "用参考音频创建克隆音色并加入音色列表",
+		settingBosonGenVoiceTesting: "正在生成克隆音色…",
+		settingBosonGenVoiceOk: "克隆音色已添加到音色列表",
+		settingBosonGenVoiceFail: "音色生成失败：{error}",
+		clonedVoiceName: "克隆音色 {n}",
 		settingTtsVoiceLibraryName: "配音音色",
 		ttsVoiceRecommended: "推荐",
 		ttsVoiceDelete: "删除",
+		ttsVoiceRename: "重命名",
 		ttsVoiceAddName: "添加音色",
 		ttsVoiceAddDesc: "任意豆包 voice_type（资源版本自动匹配）",
 		ttsVoiceAddNamePlaceholder: "名称（可选）",
@@ -181,9 +188,16 @@ const UI_TEXT: Record<UiLanguage, Record<string, string>> = {
 		settingTtsAccessKeyName: "API Key",
 		settingTtsAccessKeyDesc: "API Key for the TTS service.",
 		settingTtsGetKeyLink: "Get an API Key →",
+		settingBosonGenVoiceButton: "Generate Voice",
+		settingBosonGenVoiceDesc: "Create a cloned voice from reference audio and add it to the voice list",
+		settingBosonGenVoiceTesting: "Generating cloned voice…",
+		settingBosonGenVoiceOk: "Cloned voice added to the voice list",
+		settingBosonGenVoiceFail: "Voice generation failed: {error}",
+		clonedVoiceName: "Clone {n}",
 		settingTtsVoiceLibraryName: "Voices",
 		ttsVoiceRecommended: "Recommended",
 		ttsVoiceDelete: "Delete",
+		ttsVoiceRename: "Rename",
 		ttsVoiceAddName: "Add a voice",
 		ttsVoiceAddDesc: "Any Doubao voice_type (resource auto-matched)",
 		ttsVoiceAddNamePlaceholder: "Name (optional)",
@@ -242,6 +256,8 @@ interface TtsVoice {
 	style?: string;
 	hue?: number;
 	recommended?: boolean;
+	refAudio?: string;
+	refText?: string;
 }
 
 const DEFAULT_TTS_VOICES: TtsVoice[] = [
@@ -974,7 +990,9 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 					voiceType: (v.voiceType as string).trim(),
 					style: typeof v.style === "string" ? v.style : undefined,
 					hue: typeof v.hue === "number" ? v.hue : undefined,
-					recommended: v.recommended === true ? true : undefined
+					recommended: v.recommended === true ? true : undefined,
+					refAudio: typeof v.refAudio === "string" && v.refAudio.trim() !== "" ? v.refAudio.trim() : undefined,
+					refText: typeof v.refText === "string" && v.refText.trim() !== "" ? v.refText.trim() : undefined
 				}));
 		} else {
 			// no saved list (fresh install / migration): start from a copy of the presets
@@ -1348,7 +1366,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		return btoa(bin);
 	}
 
-	synthesizeTestSample(voiceType: string): Promise<Uint8Array> {
+	async synthesizeTestSample(voiceType: string): Promise<Uint8Array> {
 		const needsKey = this.settings.ttsProvider !== "edge-tts";
 		if (needsKey && this.settings.ttsAccessKey.trim() === "") {
 			throw new Error(this.t("noticeTtsNoApiKey"));
@@ -1357,7 +1375,46 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		if (!speaker) {
 			throw new Error(this.t("ttsVoiceAddNeedId"));
 		}
-		return this.getCurrentProvider().call(this.settings.ttsAccessKey, "你好，这是配音音色测试。", speaker, undefined, undefined);
+		// Check if the voice is a cloned voice with refAudio
+		const voice = this.settings.ttsVoices.find(v => v.voiceType === speaker);
+		let refAudio = voice?.refAudio || (this.settings.ttsProvider === "boson" ? this.settings.bosonRefAudio || undefined : undefined);
+		const refText = voice?.refText || (this.settings.ttsProvider === "boson" ? this.settings.bosonRefText || undefined : undefined);
+		if (refAudio) refAudio = await this.resolveRefAudio(refAudio);
+		return this.getCurrentProvider().call(this.settings.ttsAccessKey, "你好，这是配音音色测试。", speaker, refAudio, refText);
+	}
+
+	async synthesizeCloneSample(refAudio: string, refText?: string): Promise<Uint8Array> {
+		const needsKey = this.settings.ttsProvider !== "edge-tts";
+		if (needsKey && this.settings.ttsAccessKey.trim() === "") {
+			throw new Error(this.t("noticeTtsNoApiKey"));
+		}
+		if (!refAudio) {
+			throw new Error("Reference audio URL is required");
+		}
+		const resolvedRefAudio = await this.resolveRefAudio(refAudio);
+		return this.getCurrentProvider().call(this.settings.ttsAccessKey, "你好，这是音色克隆测试。", "", resolvedRefAudio, refText);
+	}
+
+	/**
+	 * Convert a local file path or file:// URL to a data URI so the Boson API
+	 * can access it. http/https/data URIs are returned as-is.
+	 */
+	private async resolveRefAudio(refAudio: string): Promise<string> {
+		if (/^(https?:\/\/|data:)/i.test(refAudio)) return refAudio;
+		const fs = require("fs");
+		let filePath = refAudio;
+		// file:/// URI — extract the local path
+		if (filePath.startsWith("file://")) {
+			filePath = decodeURIComponent(filePath.replace(/^file:\/\/\//, ""));
+		}
+		if (!fs.existsSync(filePath)) {
+			throw new Error("Reference audio file not found: " + refAudio);
+		}
+		const ext = filePath.split(".").pop() || "mp3";
+		const mime = this.getMimeType(ext);
+		const buf: Buffer = fs.readFileSync(filePath);
+		const b64 = this.bytesToBase64(new Uint8Array(buf));
+		return "data:" + mime + ";base64," + b64;
 	}
 
 	private async withTtsLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -1416,8 +1473,10 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 				setProgress(i + 1);
 
 				// Retry loop: rate-limited segments are retried with backoff
-				const refAudio = provider.id === "boson" ? this.settings.bosonRefAudio || undefined : undefined;
-				const refText = provider.id === "boson" ? this.settings.bosonRefText || undefined : undefined;
+				const selectedVoice = provider.id === "boson" ? this.settings.ttsVoices.find(v => v.voiceType === this.settings.ttsVoiceType) : undefined;
+				let refAudio: string | undefined = provider.id === "boson" ? (selectedVoice?.refAudio || this.settings.bosonRefAudio || undefined) : undefined;
+				const refText = provider.id === "boson" ? (selectedVoice?.refText || this.settings.bosonRefText || undefined) : undefined;
+				if (refAudio) refAudio = await this.resolveRefAudio(refAudio);
 				for (let attempt = 0; attempt < 3; attempt++) {
 					try {
 						const bytes = await this.withTtsLock(() => provider.call(
@@ -2168,7 +2227,14 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			jpeg: "image/jpeg",
 			png: "image/png",
 			svg: "image/svg+xml",
-			webp: "image/webp"
+			webp: "image/webp",
+			mp3: "audio/mpeg",
+			wav: "audio/wav",
+			ogg: "audio/ogg",
+			m4a: "audio/mp4",
+			aac: "audio/aac",
+			wma: "audio/x-ms-wma",
+			flac: "audio/flac"
 		};
 
 		return mimeTypes[lower] ?? "application/octet-stream";
@@ -2724,7 +2790,66 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 								this.plugin.settings.bosonRefAudio = value.trim();
 								await this.plugin.saveSettings();
 							})
-						);
+						)
+						.addButton((btn) => {
+							btn.setButtonText(this.plugin.t("settingBosonGenVoiceButton"))
+								.setCta()
+								.onClick(async () => {
+									const refAudioUrl = this.plugin.settings.bosonRefAudio.trim();
+									if (!refAudioUrl) {
+										new Notice("请先填写参考音频 URL");
+										return;
+									}
+									const refText = this.plugin.settings.bosonRefText.trim() || undefined;
+									const statusEl = containerEl.querySelector(".n2h-clone-status") as HTMLElement;
+									if (statusEl) {
+										statusEl.empty();
+										statusEl.addClass("is-visible");
+										statusEl.createDiv({ cls: "n2h-test-title", text: this.plugin.t("settingBosonGenVoiceTesting") });
+									}
+									btn.setDisabled(true);
+									try {
+										const bytes = await this.plugin.synthesizeCloneSample(refAudioUrl, refText);
+										const buf = new Uint8Array(bytes.length);
+										buf.set(bytes);
+										const url = URL.createObjectURL(new Blob([buf], { type: "audio/mp3" }));
+										const audio = new Audio(url);
+										audio.addEventListener("ended", () => URL.revokeObjectURL(url));
+										await audio.play();
+										const voices = this.plugin.settings.ttsVoices;
+										const cloneNum = voices.filter(v => v.voiceType.startsWith("__clone__")).length + 1;
+										const name = this.plugin.t("clonedVoiceName", { n: cloneNum });
+										const voiceType = "__clone__" + Date.now();
+										voices.push({ name, voiceType, hue: this.hueFor(voiceType), refAudio: refAudioUrl, refText });
+										this.plugin.settings.ttsVoiceType = voiceType;
+										await this.plugin.saveSettings();
+										if (statusEl) {
+											statusEl.empty();
+											statusEl.addClass("is-visible");
+											const media = statusEl.createDiv({ cls: "n2h-test-media" });
+											media.createSpan({ cls: "n2h-test-ok", text: "✓" });
+											const content = statusEl.createDiv({ cls: "n2h-test-content" });
+											content.createDiv({ cls: "n2h-test-title", text: this.plugin.t("settingBosonGenVoiceOk") });
+											content.createDiv({ cls: "n2h-test-desc", text: name });
+										}
+										const voiceListEl = containerEl.querySelector(".n2h-voice-list") as HTMLElement;
+										if (voiceListEl) this.renderVoiceList(voiceListEl);
+									} catch (err) {
+										const msg = err instanceof Error ? err.message : String(err);
+										if (statusEl) {
+											statusEl.empty();
+											statusEl.addClass("is-visible");
+											const media = statusEl.createDiv({ cls: "n2h-test-media" });
+											media.createSpan({ cls: "n2h-test-err", text: "✗" });
+											const content = statusEl.createDiv({ cls: "n2h-test-content" });
+											content.createDiv({ cls: "n2h-test-title", text: this.plugin.t("ttsVoiceTestFailTitle") });
+											content.createDiv({ cls: "n2h-test-desc", text: msg });
+										}
+									} finally {
+										btn.setDisabled(false);
+									}
+								});
+						});
 
 					new Setting(containerEl)
 						.setName(this.plugin.t("settingBosonRefTextName"))
@@ -2735,6 +2860,9 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 								await this.plugin.saveSettings();
 							})
 						);
+
+					// Inline clone status card
+					const cloneStatus = containerEl.createDiv({ cls: "n2h-clone-status n2h-test-status" });
 				}
 
 			new Setting(containerEl).setName(this.plugin.t("settingTtsVoiceLibraryName")).setHeading();
@@ -2793,6 +2921,41 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 					this.renderVoiceList(listEl);
 				})();
 			});
+
+			if (voice.refAudio) {
+				const renameBtn = row.createEl("button", {
+					cls: "n2h-voice-rename",
+					attr: { "aria-label": this.plugin.t("ttsVoiceRename"), title: this.plugin.t("ttsVoiceRename") }
+				});
+				setIcon(renameBtn, "pencil");
+				renameBtn.addEventListener("click", (e) => {
+					e.stopPropagation();
+					const nameLine = row.querySelector(".n2h-voice-name");
+					if (!nameLine) return;
+					const currentSpan = nameLine.querySelector("span");
+					if (!currentSpan) return;
+					const input = document.createElement("input");
+					input.type = "text";
+					input.value = voice.name;
+					input.className = "n2h-voice-rename-input";
+					currentSpan.replaceWith(input);
+					input.focus();
+					input.select();
+					const finish = async () => {
+						const val = input.value.trim();
+						if (val && val !== voice.name) {
+							voice.name = val;
+							await this.plugin.saveSettings();
+						}
+						this.renderVoiceList(listEl);
+					};
+					input.addEventListener("blur", () => { void finish(); });
+					input.addEventListener("keydown", (ev) => {
+						if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
+						if (ev.key === "Escape") { this.renderVoiceList(listEl); }
+					});
+				});
+			}
 
 			row.addEventListener("click", () => {
 				void (async () => {
@@ -2897,7 +3060,7 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 		if (showCheck) {
 			nameLine.createSpan({ cls: "n2h-voice-check", text: "✓" });
 		}
-		meta.createDiv({ cls: "n2h-voice-sub", text: voice.voiceType + (voice.style ? "  ·  " + voice.style : "") });
+		meta.createDiv({ cls: "n2h-voice-sub", text: (voice.refAudio ? (this.plugin.getInterfaceLanguage() === "zh" ? "参考音频克隆" : "Clone") : voice.voiceType) + (voice.style ? "  ·  " + voice.style : "") });
 	}
 
 	// Inline test-status card (shadcn "Item"-style): spinner/icon + title + description.
