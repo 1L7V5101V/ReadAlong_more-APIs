@@ -1168,7 +1168,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			if (sentences.length > 0) {
 				const currentGenId = ++this.ttsGenerationId;
 				try {
-					const clips = await this.withTtsLock(() => this.generateTtsPlaylist(sentences, currentGenId));
+					const clips = await this.generateTtsPlaylist(sentences, currentGenId);
 
 					if (clips.length > 0) {
 						body = wrappedBody;
@@ -1418,7 +1418,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 				try {
 					const refAudio = provider.id === "boson" ? this.settings.bosonRefAudio || undefined : undefined;
 					const refText = provider.id === "boson" ? this.settings.bosonRefText || undefined : undefined;
-					const bytes = await provider.call(this.settings.ttsAccessKey, sentences[i], this.settings.ttsVoiceType, refAudio, refText);
+					const bytes = await this.withTtsLock(() => provider.call(this.settings.ttsAccessKey, sentences[i], this.settings.ttsVoiceType, refAudio, refText));
 					if (bytes.length === 0) {
 						throw new Error("empty audio");
 					}
