@@ -1380,7 +1380,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		const provider = this.getCurrentProvider();
 		let failedCount = 0;
 		let firstError = "";
-		let resolvedResourceId = ""; // detected on first success, reused for the rest
+		let retryDelay = 500; // grows on rate-limit, decays on success
 
 		// One persistent light progress card (loader + progress bar + Cancel) instead of a
 		// fresh toast per sentence (which stacked up dozens deep on long notes).
@@ -1415,35 +1415,56 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 
 				setProgress(i + 1);
 
-				try {
-					const refAudio = provider.id === "boson" ? this.settings.bosonRefAudio || undefined : undefined;
-					const refText = provider.id === "boson" ? this.settings.bosonRefText || undefined : undefined;
-					const bytes = await this.withTtsLock(() => provider.call(this.settings.ttsAccessKey, sentences[i], this.settings.ttsVoiceType, refAudio, refText));
-					if (bytes.length === 0) {
-						throw new Error("empty audio");
-					}
-					clips.push({ idx: i, audio: this.bytesToBase64(bytes) });
-				} catch (err) {
-					if (this.ttsGenerations.get(generationId) === false) {
-						throw new Error("TTS generation cancelled");
-					}
-					console.error(`TTS failed for sentence ${i}:`, err);
-					if (!firstError) firstError = err instanceof Error ? err.message : String(err);
-					failedCount++;
+				// Retry loop: rate-limited segments are retried with backoff
+				const refAudio = provider.id === "boson" ? this.settings.bosonRefAudio || undefined : undefined;
+				const refText = provider.id === "boson" ? this.settings.bosonRefText || undefined : undefined;
+				for (let attempt = 0; attempt < 3; attempt++) {
+					try {
+						const bytes = await this.withTtsLock(() => provider.call(
+							this.settings.ttsAccessKey, sentences[i],
+							this.settings.ttsVoiceType, refAudio, refText
+						));
+						if (bytes.length === 0) {
+							throw new Error("empty audio");
+						}
+						clips.push({ idx: i, audio: this.bytesToBase64(bytes) });
+						retryDelay = Math.max(500, Math.floor(retryDelay * 0.8));
+						break; // success — next sentence
+					} catch (err) {
+						if (this.ttsGenerations.get(generationId) === false) {
+							throw new Error("TTS generation cancelled");
+						}
+						const msg = err instanceof Error ? err.message : String(err);
+						const isRateLimit = /429|ratelimit|rate.limit|too many requests/i.test(msg);
 
-					// Circuit breaker: a systemic problem (proxy down, bad API key,
-					// network outage) makes every sentence fail identically. Rather
-					// than march through all N sentences before reporting it, bail out
-					// as soon as the first few consecutive attempts fail with nothing
-					// succeeding yet — turns a multi-minute wait into a few seconds.
-					const abortAfter = Math.min(5, sentences.length);
-					if (clips.length === 0 && failedCount >= abortAfter) {
-						throw new Error(`all segments failed (${firstError})`);
+						if (isRateLimit && attempt < 2) {
+							const wait = retryDelay * Math.pow(2, attempt);
+							console.warn(`TTS rate-limited on sentence ${i}, retry ${attempt + 1} in ${wait}ms`);
+							descEl.setText(`${i + 1} / ${sentences.length} (backoff ${wait}ms…)`);
+							await this.sleep(wait);
+							retryDelay = Math.min(retryDelay * 2, 8000);
+							continue; // retry same sentence
+						}
+
+						console.error(`TTS failed for sentence ${i}:`, err);
+						if (!firstError) firstError = msg;
+						failedCount++;
+
+						// Circuit breaker: a systemic problem (proxy down, bad API key,
+						// network outage) makes every sentence fail identically. Rather
+						// than march through all N sentences before reporting it, bail out
+						// as soon as the first few consecutive attempts fail with nothing
+						// succeeding yet — turns a multi-minute wait into a few seconds.
+						const abortAfter = Math.min(5, sentences.length);
+						if (clips.length === 0 && failedCount >= abortAfter) {
+							throw new Error(`all segments failed (${firstError})`);
+						}
+						break; // give up on this sentence
 					}
 				}
 
 				if (i < sentences.length - 1) {
-					await this.sleep(150);
+					await this.sleep(retryDelay);
 				}
 			}
 		} finally {
