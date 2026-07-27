@@ -794,6 +794,8 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 	private ttsGenerationId = 0;
 	/** Tracks active TTS generations: Map<id, cancelled?>. Supports parallel exports. */
 	private ttsGenerations = new Map<number, boolean>();
+	/** Serializes TTS generation across parallel exports to avoid API rate limits. */
+	private ttsLock: Promise<void> = Promise.resolve();
 
 	getCurrentProvider(): TtsProvider {
 		return TTS_PROVIDERS[this.settings.ttsProvider] || TTS_PROVIDERS.volcengine;
@@ -1081,9 +1083,8 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			return;
 		}
 
-		// Parallel export with stagger between files (reduces TTS API contention)
-		const results = await Promise.allSettled(files.map(async (file, index) => {
-			if (index > 0) await this.sleep(1200);
+		// Parallel export (faster for many files; TTS is serialized globally via ttsLock)
+		const results = await Promise.allSettled(files.map(async (file) => {
 			try {
 				await this.exportFile(file, false);
 				return true;
@@ -1167,7 +1168,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			if (sentences.length > 0) {
 				const currentGenId = ++this.ttsGenerationId;
 				try {
-					const clips = await this.generateTtsPlaylist(sentences, currentGenId);
+					const clips = await this.withTtsLock(() => this.generateTtsPlaylist(sentences, currentGenId));
 
 					if (clips.length > 0) {
 						body = wrappedBody;
@@ -1357,6 +1358,18 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			throw new Error(this.t("ttsVoiceAddNeedId"));
 		}
 		return this.getCurrentProvider().call(this.settings.ttsAccessKey, "你好，这是配音音色测试。", speaker, undefined, undefined);
+	}
+
+	private async withTtsLock<T>(fn: () => Promise<T>): Promise<T> {
+		const prev = this.ttsLock;
+		let release: () => void;
+		this.ttsLock = new Promise<void>(resolve => { release = resolve; });
+		await prev;
+		try {
+			return await fn();
+		} finally {
+			release!();
+		}
 	}
 
 	private async generateTtsPlaylist(
