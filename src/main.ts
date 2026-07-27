@@ -1081,8 +1081,9 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			return;
 		}
 
-		// Parallel export (faster for many files)
-		const results = await Promise.allSettled(files.map(async (file) => {
+		// Parallel export with stagger between files (reduces TTS API contention)
+		const results = await Promise.allSettled(files.map(async (file, index) => {
+			if (index > 0) await this.sleep(1200);
 			try {
 				await this.exportFile(file, false);
 				return true;
@@ -1440,7 +1441,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			throw new Error(`all segments failed (${firstError})`);
 		}
 		if (failedCount > 0) {
-			new Notice(this.t("noticeTtsFailed", { error: `${failedCount} segments failed` }), 5000);
+			new Notice(this.t("noticeTtsFailed", { error: `${failedCount} segments failed (${firstError})` }), 5000);
 		}
 
 		return clips;
