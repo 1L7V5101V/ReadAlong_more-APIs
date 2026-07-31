@@ -90,6 +90,10 @@ const UI_TEXT: Record<UiLanguage, Record<string, string>> = {
 		settingBosonRefTextName: "参考音频转录文本",
 		settingBosonRefTextDesc: "参考音频的逐字转录文本（可选，但推荐提供以提升克隆质量）。",
 		settingTtsEnabledDesc: "导出时调用语音合成 API 生成音频并嵌入 HTML，支持逐句高亮。",
+		settingTtsSequentialName: "串行导出（逐篇）",
+		settingTtsSequentialDesc: "导出文件夹时一次只处理一篇笔记，避免并行请求触发限流。更慢但更稳。",
+		settingTtsMinIntervalName: "请求间隔 (毫秒)",
+		settingTtsMinIntervalDesc: "两次语音合成请求之间的最小间隔，并行导出时全局共享。默认 500ms（约 2 QPS）；值越小越快，但越容易被限流。遇到 429 会自动临时加长间隔。",
 		settingTtsAccessKeyName: "API Key",
 		settingTtsAccessKeyDesc: "API Key。",
 		settingTtsGetKeyLink: "获取 API Key →",
@@ -185,6 +189,10 @@ const UI_TEXT: Record<UiLanguage, Record<string, string>> = {
 		settingBosonRefTextName: "Reference Audio Transcript",
 		settingBosonRefTextDesc: "Verbatim transcript of the reference audio (optional, but recommended for better clone quality).",
 		settingTtsEnabledDesc: "Generate speech audio on export via TTS API and embed it with sentence highlighting.",
+		settingTtsSequentialName: "Serial export (one note at a time)",
+		settingTtsSequentialDesc: "When exporting a folder, process one note at a time to avoid parallel requests tripping rate limits. Slower but more reliable.",
+		settingTtsMinIntervalName: "Request interval (ms)",
+		settingTtsMinIntervalDesc: "Minimum gap between TTS requests, shared across all exports. Default 500ms (~2 QPS); lower is faster but more likely to be throttled. Backs off automatically on 429.",
 		settingTtsAccessKeyName: "API Key",
 		settingTtsAccessKeyDesc: "API Key for the TTS service.",
 		settingTtsGetKeyLink: "Get an API Key →",
@@ -239,6 +247,8 @@ interface ReadableHtmlSettings {
 	createLauncherNote: boolean;
 	insertLinkInSource: boolean;
 	ttsEnabled: boolean;
+	ttsSequential: boolean;
+	ttsMinRequestInterval: number;
 	ttsProvider: string;
 	bosonRefAudio: string;
 	bosonRefText: string;
@@ -283,6 +293,8 @@ const DEFAULT_SETTINGS: ReadableHtmlSettings = {
 	createLauncherNote: false,
 	insertLinkInSource: true,
 	ttsEnabled: false,
+	ttsSequential: false,
+	ttsMinRequestInterval: 500,
 	ttsProvider: "volcengine",
 	bosonRefAudio: "",
 	bosonRefText: "",
@@ -810,8 +822,13 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 	private ttsGenerationId = 0;
 	/** Tracks active TTS generations: Map<id, cancelled?>. Supports parallel exports. */
 	private ttsGenerations = new Map<number, boolean>();
-	/** Serializes TTS generation across parallel exports to avoid API rate limits. */
+	/** Serializes + paces TTS generation across parallel exports to avoid API rate limits. */
 	private ttsLock: Promise<void> = Promise.resolve();
+	/** Timestamp of the last real TTS API request (shared across exports) for global pacing. */
+	private lastTtsRequestAt = 0;
+	/** Adaptive congestion: doubled on each rate-limit, decays back after quiet periods. */
+	private ttsCongestionFactor = 1;
+	private lastTtsRateLimitAt = 0;
 
 	getCurrentProvider(): TtsProvider {
 		return TTS_PROVIDERS[this.settings.ttsProvider] || TTS_PROVIDERS.volcengine;
@@ -943,6 +960,12 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		}
 		if (typeof data.ttsEnabled === "boolean") {
 			settings.ttsEnabled = data.ttsEnabled;
+		}
+		if (typeof data.ttsSequential === "boolean") {
+			settings.ttsSequential = data.ttsSequential;
+		}
+		if (typeof data.ttsMinRequestInterval === "number") {
+			settings.ttsMinRequestInterval = Math.max(50, Math.min(10000, data.ttsMinRequestInterval));
 		}
 		if (typeof data.ttsProvider === "string") {
 			settings.ttsProvider = data.ttsProvider;
@@ -1101,8 +1124,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			return;
 		}
 
-		// Parallel export (faster for many files; TTS is serialized globally via ttsLock)
-		const results = await Promise.allSettled(files.map(async (file) => {
+		const exportOne = async (file: TFile): Promise<boolean> => {
 			try {
 				await this.exportFile(file, false);
 				return true;
@@ -1110,8 +1132,21 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 				console.error("Export failed for", file.path, e);
 				return false;
 			}
-		}));
-		const successCount = results.filter((r) => r.status === "fulfilled" && r.value === true).length;
+		};
+
+		let successCount: number;
+		if (this.settings.ttsSequential) {
+			// Serial export (one note at a time): avoids parallel requests tripping the
+			// TTS provider's rate limit, at the cost of speed.
+			successCount = 0;
+			for (const file of files) {
+				if (await exportOne(file)) successCount++;
+			}
+		} else {
+			// Parallel export (faster for many files; TTS is serialized globally via ttsLock)
+			const results = await Promise.allSettled(files.map((file) => exportOne(file)));
+			successCount = results.filter((r) => r.status === "fulfilled" && r.value === true).length;
+		}
 
 			new Notice(this.t("noticeFolderExported", { count: successCount }));
 	}
@@ -1417,13 +1452,41 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 		return "data:" + mime + ";base64," + b64;
 	}
 
-	private async withTtsLock<T>(fn: () => Promise<T>): Promise<T> {
+	/** Effective request interval, lengthened by congestion and decayed over quiet periods. */
+	private getTtsRequestInterval(): number {
+		let factor = 1;
+		if (this.lastTtsRateLimitAt > 0) {
+			const elapsed = Date.now() - this.lastTtsRateLimitAt;
+			// Halve the congestion factor for every 30s without a rate-limit (back to 1 eventually).
+			const halvings = Math.floor(elapsed / 30000);
+			factor = Math.max(1, this.ttsCongestionFactor / Math.pow(2, halvings));
+		}
+		return this.settings.ttsMinRequestInterval * factor;
+	}
+
+	private noteTtsRateLimit(): void {
+		this.ttsCongestionFactor = Math.min(8, this.ttsCongestionFactor * 2);
+		this.lastTtsRateLimitAt = Date.now();
+	}
+
+	private async withTtsPace<T>(fn: () => Promise<T>): Promise<T> {
 		const prev = this.ttsLock;
 		let release: () => void;
 		this.ttsLock = new Promise<void>(resolve => { release = resolve; });
 		await prev;
 		try {
-			return await fn();
+			// The pacing sleep runs while holding the global lock, so the minimum gap between
+			// real API requests holds across all concurrent exports — the per-playlist sleep
+			// in generateTtsPlaylist can't provide that because it happens outside the lock.
+			const interval = this.getTtsRequestInterval();
+			const now = Date.now();
+			const wait = this.lastTtsRequestAt === 0
+				? 0
+				: Math.max(0, this.lastTtsRequestAt + interval - now);
+			if (wait > 0) await this.sleep(wait);
+			const result = await fn();
+			this.lastTtsRequestAt = Date.now();
+			return result;
 		} finally {
 			release!();
 		}
@@ -1479,7 +1542,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 				if (refAudio) refAudio = await this.resolveRefAudio(refAudio);
 				for (let attempt = 0; attempt < 3; attempt++) {
 					try {
-						const bytes = await this.withTtsLock(() => provider.call(
+						const bytes = await this.withTtsPace(() => provider.call(
 							this.settings.ttsAccessKey, sentences[i],
 							this.settings.ttsVoiceType, refAudio, refText
 						));
@@ -1497,6 +1560,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 						const isRateLimit = /429|ratelimit|rate.limit|too many requests/i.test(msg);
 
 						if (isRateLimit && attempt < 2) {
+							this.noteTtsRateLimit();
 							const wait = retryDelay * Math.pow(2, attempt);
 							console.warn(`TTS rate-limited on sentence ${i}, retry ${attempt + 1} in ${wait}ms`);
 							descEl.setText(`${i + 1} / ${sentences.length} (backoff ${wait}ms…)`);
@@ -2733,6 +2797,28 @@ class ReadableHtmlSettingTab extends PluginSettingTab {
 			);
 
 		if (this.plugin.settings.ttsEnabled) {
+			new Setting(containerEl)
+				.setName(this.plugin.t("settingTtsSequentialName"))
+				.setDesc(this.plugin.t("settingTtsSequentialDesc"))
+				.addToggle((toggle) =>
+					toggle.setValue(this.plugin.settings.ttsSequential).onChange(async (value) => {
+						this.plugin.settings.ttsSequential = value;
+						await this.plugin.saveSettings();
+					})
+				);
+
+			new Setting(containerEl)
+				.setName(this.plugin.t("settingTtsMinIntervalName"))
+				.setDesc(this.plugin.t("settingTtsMinIntervalDesc"))
+				.addSlider((slider) => {
+					slider.setLimits(100, 2000, 50);
+					slider.setValue(this.plugin.settings.ttsMinRequestInterval);
+					slider.onChange(async (value) => {
+						this.plugin.settings.ttsMinRequestInterval = value;
+						await this.plugin.saveSettings();
+					});
+				});
+
 			if (this.plugin.settings.ttsProvider !== "edge-tts") {
 				new Setting(containerEl)
 					.setName(this.plugin.t("settingTtsAccessKeyName"))
