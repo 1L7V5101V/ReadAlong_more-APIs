@@ -1941,6 +1941,7 @@ export default class ReadableHtmlExporterPlugin extends Plugin {
 			transformed = await this.convertObsidianEmbeds(transformed, sourceFile);
 			transformed = await this.convertMarkdownImages(transformed, sourceFile);
 			transformed = this.convertWikilinks(transformed);
+			transformed = transformed.replace(/==(.+?)==/g, "<mark>$1</mark>");
 			return transformed;
 		});
 	}
@@ -4225,6 +4226,19 @@ body.tts-playing .article-body .tts-s.tts-active strong {
 
 	.tts-time {
 		min-width: 0;
+	}
+}
+mark {
+	background: #ffec7f;
+	color: #222;
+	padding: 0.08rem 0.2rem;
+	border-radius: 3px;
+}
+
+@media (prefers-color-scheme: dark) {
+	mark {
+		background: #664e00;
+		color: #f0e68c;
 	}
 }
 `.trim();
